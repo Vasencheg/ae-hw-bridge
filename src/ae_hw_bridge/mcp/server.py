@@ -85,23 +85,32 @@ def create_server(
             u_port = uart_port or t_cfg.uart_port or config.uart_port
             puppet_id = t_cfg.puppet or config.puppet
 
-            puppet = resolve_puppet(
-                puppet_name_or_badge=puppet_id,
-                control_port=ctrl_port,
-                uart_port=u_port,
-                probe_badges=True,
-            )
-
-            client = repl if repl else ensure_daemon_running(
-                name=target_name,
-                control_port=puppet.control_port,
-                uart_port=puppet.uart_port,
-            )
+            if repl is not None:
+                client = repl
+                console_client = console or (repl if isinstance(repl, IConsoleReader) else ConsoleReader(port=u_port or get_default_uart_port()))
+            else:
+                try:
+                    puppet = resolve_puppet(
+                        puppet_name_or_badge=puppet_id,
+                        control_port=ctrl_port,
+                        uart_port=u_port,
+                        probe_badges=True,
+                    )
+                    client = ensure_daemon_running(
+                        name=target_name,
+                        control_port=puppet.control_port,
+                        uart_port=puppet.uart_port,
+                    )
+                    console_client = client
+                except RuntimeError as e:
+                    _logger.warning("Hardware unavailable (%s); using offline mode for target '%s'", e, target_name)
+                    client = ReplClient(port=ctrl_port or get_default_control_port())
+                    console_client = ConsoleReader(port=u_port or get_default_uart_port())
 
             target_instance = TargetLoader.load_named_target(
                 name=target_name,
                 repl=client,
-                console=client,
+                console=console_client,
                 target_path=t_cfg.path or target_path,
             )
 
@@ -116,20 +125,29 @@ def create_server(
     u_port = uart_port or config.uart_port
     puppet_id = config.puppet
 
-    puppet = resolve_puppet(
-        puppet_name_or_badge=puppet_id,
-        control_port=ctrl_port,
-        uart_port=u_port,
-        probe_badges=True,
-    )
+    if repl is not None:
+        client = repl
+        console_client = console or (repl if isinstance(repl, IConsoleReader) else ConsoleReader(port=u_port or get_default_uart_port()))
+    else:
+        try:
+            puppet = resolve_puppet(
+                puppet_name_or_badge=puppet_id,
+                control_port=ctrl_port,
+                uart_port=u_port,
+                probe_badges=True,
+            )
+            client = ensure_daemon_running(
+                name="base",
+                control_port=puppet.control_port,
+                uart_port=puppet.uart_port,
+            )
+            console_client = client
+        except RuntimeError as e:
+            _logger.warning("Hardware unavailable (%s); using offline BaseTarget mode", e)
+            client = ReplClient(port=ctrl_port or get_default_control_port())
+            console_client = ConsoleReader(port=u_port or get_default_uart_port())
 
-    client = repl if repl else ensure_daemon_running(
-        name="base",
-        control_port=puppet.control_port,
-        uart_port=puppet.uart_port,
-    )
-
-    base_instance = BaseTarget(repl=client, console=client)
+    base_instance = BaseTarget(repl=client, console=console_client)
     register_tools(mcp, target=base_instance, prefix=None)
     return mcp
 
