@@ -6,7 +6,7 @@
 
 Hardware-in-the-Loop (HIL) automation gateway and FastMCP server for the **Agents Engine (`ae`)** ecosystem.
 
-`ae-hw-bridge` provides AI agents (Agents Engine, Claude, Gemini, etc.) with a safe, programmable, tool-based interface to interact with physical development boards (DUTs) via **Model Context Protocol (MCP)**.
+`ae-hw-bridge` provides AI agents (Agents Engine, Claude, Gemini, Cursor) with a safe, programmable, tool-based interface to interact with physical development boards (DUTs) via the **Model Context Protocol (MCP)**.
 
 It pairs with the [**`hw-puppet`**](https://github.com/Vasencheg/hw-puppet) Dual-CDC USB bridge. Precompiled firmware binaries are available on the [**hw-puppet Releases**](https://github.com/Vasencheg/hw-puppet/releases) page.
 
@@ -15,46 +15,60 @@ It pairs with the [**`hw-puppet`**](https://github.com/Vasencheg/hw-puppet) Dual
 ## 1. System Architecture
 
 ```text
-[ AI Agent / Agents Engine (ae) / Claude / Gemini ]
+[ AI Agent / Agents Engine (ae) / Claude / Gemini / Cursor ]
                       │
                       │ stdio / SSE (JSON-RPC via Model Context Protocol)
                       ▼
          [ ae-hw-bridge FastMCP Server ]
                       │
-                      │ Unix Domain Socket IPC (/tmp/ae-hw-bridge.sock)
+                      │ Scoped Unix Domain Sockets (/tmp/ae-hw-bridge-{target}.sock)
                       ▼
             [ ae-hw-bridge Daemon ]
        ├─ Bounded Circular Log Buffer (collections.deque)
        ├─ Target Domain Logic (.ae-hw-bridge/targets/)
        │
-       ├─── CDC 0: MicroPython Raw REPL (/dev/hw-puppet-control or /dev/ttyACM0) ──┐
-       └─── CDC 1: Target UART Console  (/dev/hw-puppet-uart or /dev/ttyACM1)    ─┐│
-                                                                                 ││ (USB Full-Speed)
-                                                                                 ▼▼
-                                                                       [ hw-puppet (ESP32-S3) ]
-                                                                       (Firmware & HIL Adapter)
-                                                                             │        │
-                                                                  (Control lines)  (TX/RX UART)
-                                                                             ▼        ▼
-                                                                     [ Target Dev Board ]
-                                                                 (NVIDIA Jetson, Pi, etc.)
+       ├─── CDC 0: MicroPython Raw REPL (/dev/ttyACM* or sysfs-paired) ──┐
+       └─── CDC 1: Target UART Console  (/dev/ttyACM* or sysfs-paired) ──┐│
+                                                                         ││ (USB Full-Speed)
+                                                                         ▼▼
+                                                               [ hw-puppet (ESP32-S3) ]
+                                                               (Firmware & HIL Adapter)
+                                                                     │        │
+                                                          (Control lines)  (TX/RX UART)
+                                                                     ▼        ▼
+                                                             [ Target Dev Board ]
+                                                         (NVIDIA Jetson, Pi, STM32)
 ```
 
 ### Key Principles
-* **Separation of Concerns:** Hardware/firmware lives in [`hw-puppet`](../hw-puppet), while high-level orchestration, IPC multiplexing, and MCP tools live in `ae-hw-bridge`.
-* **Zero Host Contention:** An auto-spawning, single-owner daemon (`ae-hw-bridge-daemon`) manages exclusive access to the serial devices. Multiple agents and CLI clients connect via non-blocking Unix domain socket IPC.
+* **Separation of Concerns:** Low-level hardware drivers and USB descriptors live in [`hw-puppet`](https://github.com/Vasencheg/hw-puppet), while high-level orchestration, IPC multiplexing, and MCP tools live in `ae-hw-bridge`.
+* **Zero Host Contention:** An auto-spawning, target-scoped daemon (`ae-hw-bridge-daemon`) manages exclusive access to the serial devices. Multiple agents and CLI clients connect via non-blocking Unix domain socket IPC (`/tmp/ae-hw-bridge-{target}.sock`).
+* **Multi-Target & Multi-Puppet:** Safely binds multiple physical boards via hardware badges (stored in ESP32-S3 NVS) and Linux sysfs USB pairing without serial port number guessing or symlink collisions.
 * **Agent Safety:** Internal `@repl` methods are filtered out from MCP exposure; agents interact strictly through vetted, high-level business tools (`full_reboot`, `login`, `send_target_command`, `wait_for_console_pattern`, etc.).
-* **Dynamic Target Loading:** Target behavior (pin definitions, boot sequences, login credentials) is defined modularly in project repositories under `.ae-hw-bridge/targets/<target_name>/target.py`.
+* **Dynamic Target Loading:** Target behavior (pin definitions, boot sequences, login credentials) is defined modularly under `.ae-hw-bridge/targets/<target_name>/target.py` or `.ae-hw-bridge/config.yml`.
 
 ---
 
-## 2. FastMCP Tools Exposed to Agents
+## 2. FastMCP Tools & Naming Convention
 
-When connected, agents receive the following MCP tools:
+Tools exposed to AI agents adhere to a strict and predictable prefix convention:
+
+* **When target modules are configured** (e.g. `jetson`, `stm32`), all tools are **strictly prefixed** with `<target>_`:
+  * `jetson_read_target_console`
+  * `jetson_send_target_command`
+  * `jetson_full_reboot`, `jetson_enter_recovery`
+  * `stm32_read_target_console`, `stm32_flash_firmware`
+  This guarantees consistent agent tool contracts regardless of whether a project has 1 or N targets.
+* **In clean bench mode** (no targets defined, single `BaseTarget`), tools carry **no prefix**:
+  * `read_target_console`
+  * `send_target_command`
+  * `clear_target_console`
+
+### Core Inherited Tools
 
 | MCP Tool | Description |
 |:---|:---|
-| `get_bridge_info()` | Software version, connected ESP32-S3 `hw-puppet` firmware info, and serial port paths. |
+| `get_bridge_info()` | Software version, connected ESP32-S3 `hw-puppet` firmware metadata, badge, and port paths. |
 | `read_target_console(tail_lines=50, head_lines=None, grep=None)` | Read lines from circular console buffer (passive UART reception). |
 | `send_target_command(command, wait_timeout=5.0, idle_threshold=0.3)` | Send interactive shell command to target UART and capture delta response. |
 | `wait_for_console_pattern(pattern, timeout=30.0, check_history=True)` | Wait for regex pattern on console stream (e.g. login prompt, bootloader). |
@@ -64,7 +78,58 @@ When connected, agents receive the following MCP tools:
 
 ---
 
-## 3. Installation & Setup
+## 3. Configuration (`.ae-hw-bridge/config.yml`)
+
+You can configure hardware mappings in `.ae-hw-bridge/config.yml`:
+
+### Single Target / Clean Bench
+```yaml
+# Match connected board by persistent hardware badge:
+puppet: jetson
+
+# Or bind directly by port:
+# port: /dev/ttyACM1
+```
+
+### Multi-Target Setup
+```yaml
+targets:
+  jetson:
+    puppet: jetson-desk     # Matches HW-Puppet with badge "jetson-desk"
+  stm32:
+    puppet: stm32-bench    # Matches HW-Puppet with badge "stm32-bench"
+    port: /dev/ttyACM5     # Or explicit port
+```
+
+> [!IMPORTANT]
+> **Fail-Safe Ambiguity Protection:**
+> If multiple HW-Puppet boards are plugged into your machine and no configuration or explicit port is provided, `ae-hw-bridge` safely halts with an informative error rather than guessing a port randomly.
+
+---
+
+## 4. CLI Utilities
+
+`ae-hw-bridge` provides built-in CLI commands for managing hardware test benches:
+
+```bash
+# List all connected HW-Puppet devices, serial numbers, badges, and configured targets
+ae-hw-bridge list
+
+# Set a persistent hardware badge in ESP32-S3 NVS
+ae-hw-bridge label jetson-bench
+ae-hw-bridge label stm32-bench --port /dev/ttyACM1
+
+# Run the FastMCP server
+ae-hw-bridge
+
+# Stop a running background daemon and release serial ports
+ae-hw-bridge-daemon --stop
+ae-hw-bridge-daemon --name jetson --stop
+```
+
+---
+
+## 5. Installation & Setup
 
 ### Prerequisites
 * Linux (with udev support)
@@ -94,24 +159,8 @@ pip install ae-hw-bridge
 pip install -e .
 ```
 
-### Configure Serial Ports & Device Naming
-By default, `ae-hw-bridge` automatically detects ports in the following priority order:
-1. Environment variables `HW_PUPPET_CONTROL_PORT` / `HW_PUPPET_UART_PORT`
-2. Standard **HW Puppet** Udev symlinks: `/dev/hw-puppet-control` / `/dev/hw-puppet-uart`
-3. Standard Linux CDC fallbacks: `/dev/ttyACM0` and `/dev/ttyACM1`
-
-#### Device Naming Reference Matrix
-| Context | Name / Identifier | Purpose |
-|:---|:---|:---|
-| **Hardware Platform** | **HW Puppet** (`hw-puppet`) | Dedicated ESP32-S3 test harness firmware |
-| **USB Manufacturer** | `HW-Puppet` | USB Device Descriptor manufacturer |
-| **USB Product** | `HW-PUPPET` | USB Device Descriptor product |
-| **Control Interface** | `HW-PUPPET REPL` (`/dev/hw-puppet-control`) | CDC 0: MicroPython Raw REPL RPC |
-| **UART Interface** | `HW-PUPPET UART Bridge` (`/dev/hw-puppet-uart`) | CDC 1: Transparent target console |
-| **Host Package** | `ae-hw-bridge` (`ae_hw_bridge`) | FastMCP server, background daemon, and orchestrator |
-
-#### Linux Udev Setup (Recommended)
-Install the provided udev rules to enable non-root access and persistent device names:
+### Linux Udev Setup (Recommended)
+Install the provided udev rules to enable non-root access for all HW-Puppet CDC devices:
 ```bash
 sudo cp udev/99-hw-puppet.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
@@ -120,7 +169,7 @@ sudo udevadm trigger
 
 ---
 
-## 4. MCP Client Configuration
+## 6. MCP Client Configuration
 
 ### Claude Code CLI
 ```bash
@@ -139,15 +188,9 @@ claude mcp add ae-hw-bridge uvx ae-hw-bridge
 }
 ```
 
-### Standalone Daemon (Optional)
-The server automatically launches the background daemon if it is not already running. To run the daemon manually in foreground for debugging:
-```bash
-ae-hw-bridge-daemon --idle-timeout 0
-```
-
 ---
 
-## 5. Target Definitions
+## 7. Target Definitions
 
 Target dev boards (DUTs) are configured modularly in `.ae-hw-bridge/targets/<target_name>/`.
 
@@ -189,9 +232,9 @@ class JetsonTarget(BaseTarget):
 
 ---
 
-## 6. Running Tests
+## 8. Running Tests
 
 ```bash
 pytest
 ```
-44 unit and integration tests covering the console reader, raw REPL client, IPC protocol, daemon server/client, target loader, and MCP tool registration.
+55 unit and integration tests covering the console reader, raw REPL client, IPC protocol, daemon server/client, target loader, sysfs discovery, YAML/JSON configuration, and MCP tool registration.

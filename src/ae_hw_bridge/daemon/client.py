@@ -28,6 +28,8 @@ from ae_hw_bridge.core.port_utils import (
 from ae_hw_bridge.daemon.protocol import (
     DEFAULT_SOCKET_PATH,
     DEFAULT_SPAWN_LOCK_PATH,
+    get_socket_path,
+    get_spawn_lock_path,
     Request,
     Response,
     encode_request,
@@ -277,17 +279,21 @@ class DaemonIpcClient(IReplClient, IConsoleReader):
 def ensure_daemon_running(
     control_port: Optional[str] = None,
     uart_port: Optional[str] = None,
-    socket_path: str = DEFAULT_SOCKET_PATH,
-    spawn_lock_path: str = DEFAULT_SPAWN_LOCK_PATH,
+    name: Optional[str] = None,
+    socket_path: Optional[str] = None,
+    spawn_lock_path: Optional[str] = None,
     idle_timeout: float = 30.0,
 ) -> DaemonIpcClient:
     """Check if daemon is running; if not or if outdated, spawn it in background and wait until responsive."""
     from ae_hw_bridge.daemon.server import stop_daemon
 
+    eff_name = name or "base"
+    eff_socket_path = socket_path or get_socket_path(eff_name)
+    eff_spawn_lock = spawn_lock_path or get_spawn_lock_path(eff_name)
     eff_ctrl = control_port or get_default_control_port()
     eff_uart = uart_port or get_default_uart_port()
 
-    client = DaemonIpcClient(socket_path=socket_path)
+    client = DaemonIpcClient(socket_path=eff_socket_path)
     if client.ping():
         if client.is_compatible():
             return client
@@ -297,10 +303,10 @@ def ensure_daemon_running(
             get_daemon_signature(),
         )
         client.shutdown()
-        stop_daemon(socket_path=socket_path)
+        stop_daemon(socket_path=eff_socket_path)
 
     # Daemon not answering or was stopped; serialize spawn with flock
-    lock_fd = os.open(spawn_lock_path, os.O_CREAT | os.O_RDWR, 0o666)
+    lock_fd = os.open(eff_spawn_lock, os.O_CREAT | os.O_RDWR, 0o666)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
@@ -310,12 +316,12 @@ def ensure_daemon_running(
                 return client
             _logger.warning("Terminating incompatible daemon under lock...")
             client.shutdown()
-            stop_daemon(socket_path=socket_path)
+            stop_daemon(socket_path=eff_socket_path)
 
         # Remove stale socket file if any
-        if os.path.exists(socket_path):
+        if os.path.exists(eff_socket_path):
             try:
-                os.unlink(socket_path)
+                os.unlink(eff_socket_path)
             except OSError:
                 pass
 
@@ -327,17 +333,19 @@ def ensure_daemon_running(
             sys.executable,
             "-m",
             "ae_hw_bridge.daemon.server",
+            "--name",
+            eff_name,
             "--control-port",
             eff_ctrl,
             "--uart-port",
             eff_uart,
             "--socket-path",
-            socket_path,
+            eff_socket_path,
             "--idle-timeout",
             str(idle_timeout),
         ]
 
-        log_path = "/tmp/ae_hw_bridge_daemon.log"
+        log_path = f"/tmp/ae-hw-bridge-{eff_name}-daemon.log"
         log_file = open(log_path, "a", encoding="utf-8")
         _logger.info("Spawning background hardware daemon: %s", " ".join(daemon_cmd))
 
@@ -355,7 +363,7 @@ def ensure_daemon_running(
         while time.time() < deadline:
             time.sleep(0.1)
             if client.ping():
-                _logger.info("Daemon spawned and ready at %s", socket_path)
+                _logger.info("Daemon spawned and ready at %s", eff_socket_path)
                 return client
 
         _logger.error("Daemon failed to respond within 5.0s")

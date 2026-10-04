@@ -57,8 +57,9 @@ def test_base_target_core_methods() -> None:
         stdout="{'version': '0.2.0', 'platform': 'ESP32-S3'}\n",
         stderr="",
     )
+    from ae_hw_bridge import __version__
     info = target.get_bridge_info()
-    assert info["bridge_version"] == "0.2.0"
+    assert info["bridge_version"] == __version__
     assert info["firmware"]["version"] == "0.2.0"
     assert info["firmware"]["platform"] == "ESP32-S3"
     assert "control" in info["ports"]
@@ -145,32 +146,28 @@ def test_create_server_with_custom_target() -> None:
     )
 
     tools = server._tool_manager._tools
-    # Base tools must be present
-    assert "send_target_command" in tools
-    assert "read_target_console" in tools
-    assert "clear_target_console" in tools
-    assert "wait_for_console_pattern" in tools
-    assert "run_custom_code" in tools
+    # Target tools must be prefixed with target name (jetson_)
+    assert "jetson_send_target_command" in tools
+    assert "jetson_read_target_console" in tools
+    assert "jetson_clear_target_console" in tools
+    assert "jetson_wait_for_console_pattern" in tools
+    assert "jetson_run_custom_code" in tools
 
-    # Scenarios tools must NOT be present (scenarios removed from engine)
-    assert "run_scenario" not in tools
-    assert "list_scenarios" not in tools
-
-    # Custom high-level JetsonTarget tools must be present
-    assert "hardware_reset" in tools
-    assert "full_reboot" in tools
-    assert "enter_recovery" in tools
-    assert "check_recovery_mode" in tools
-    assert "power_button" in tools
-    assert "software_reboot" in tools
-    assert "reboot_to_bootloader" in tools
-    assert "wait_for_boot" in tools
-    assert "wait_for_shell" in tools
-    assert "login" in tools
-    assert "exec_command_with_status" in tools
-    assert "get_network_info" in tools
-    assert "get_system_info" in tools
-    assert "check_alive" in tools
+    # Custom high-level JetsonTarget tools must be present with prefix
+    assert "jetson_hardware_reset" in tools
+    assert "jetson_full_reboot" in tools
+    assert "jetson_enter_recovery" in tools
+    assert "jetson_check_recovery_mode" in tools
+    assert "jetson_power_button" in tools
+    assert "jetson_software_reboot" in tools
+    assert "jetson_reboot_to_bootloader" in tools
+    assert "jetson_wait_for_boot" in tools
+    assert "jetson_wait_for_shell" in tools
+    assert "jetson_login" in tools
+    assert "jetson_exec_command_with_status" in tools
+    assert "jetson_get_network_info" in tools
+    assert "jetson_get_system_info" in tools
+    assert "jetson_check_alive" in tools
 
     # Low-level @repl methods must NOT be exposed as agent MCP tools
     assert "trigger_reset" not in tools

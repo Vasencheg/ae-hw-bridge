@@ -1,8 +1,14 @@
 # /etc/udev/rules.d/99-hw-puppet.rules
 # Udev rules for HW-PUPPET Dual CDC Composite Device (ESP32-S3)
+#
+# Grants non-root read/write permissions (MODE="0666") for both CDC channels:
+#   - CDC 0 (Interface 00): MicroPython Control REPL & RPC
+#   - CDC 1 (Interface 02): Transparent Target UART Bridge
+#
+# Note: Generic SYMLINK+= is intentionally omitted to prevent collision when
+# multiple HW-Puppet boards are connected simultaneously. Devices are safely
+# addressed by persistent hardware badge (via ae-hw-bridge or hw_puppet.get_badge()),
+# by port path (/dev/ttyACM*), or standard /dev/serial/by-id/ symlinks.
 
-# CDC 0: Control Channel (MicroPython REPL & Raw REPL RPC)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4002", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="hw-puppet-control", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4002", MODE="0666"
 
-# CDC 1: Hardware UART Bridge (Transparent target console @ up to 921600+ baud)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4002", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="hw-puppet-uart", MODE="0666"

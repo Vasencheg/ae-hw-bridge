@@ -7,11 +7,37 @@ import uuid
 
 import hashlib
 from pathlib import Path
+import re
 from ae_hw_bridge import __version__
 
-DEFAULT_SOCKET_PATH = "/tmp/ae_hw_bridge.sock"
-DEFAULT_LOCK_PATH = "/tmp/ae_hw_bridge_daemon.lock"
-DEFAULT_SPAWN_LOCK_PATH = "/tmp/ae_hw_bridge_spawn.lock"
+
+def get_socket_path(name: Optional[str] = None) -> str:
+    """Return target-scoped Unix domain socket path."""
+    if not name or name == "base":
+        return "/tmp/ae-hw-bridge-base.sock"
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)
+    return f"/tmp/ae-hw-bridge-{safe}.sock"
+
+
+def get_lock_path(name: Optional[str] = None) -> str:
+    """Return target-scoped daemon lock file path."""
+    if not name or name == "base":
+        return "/tmp/ae-hw-bridge-base.lock"
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)
+    return f"/tmp/ae-hw-bridge-{safe}.lock"
+
+
+def get_spawn_lock_path(name: Optional[str] = None) -> str:
+    """Return target-scoped daemon spawn lock file path."""
+    if not name or name == "base":
+        return "/tmp/ae-hw-bridge-base-spawn.lock"
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)
+    return f"/tmp/ae-hw-bridge-{safe}-spawn.lock"
+
+
+DEFAULT_SOCKET_PATH = get_socket_path("base")
+DEFAULT_LOCK_PATH = get_lock_path("base")
+DEFAULT_SPAWN_LOCK_PATH = get_spawn_lock_path("base")
 
 
 def get_daemon_signature() -> str:

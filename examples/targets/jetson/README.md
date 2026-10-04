@@ -68,12 +68,13 @@ When you launch `ae-hw-bridge-mcp`:
 ```bash
 ae-hw-bridge-mcp --target ./targets/jetson
 ```
-FastMCP discovers `JetsonTarget` and registers:
-- **Power & Reset**: `hardware_reset`, `full_reboot`, `software_reboot`, `power_button`
-- **Bootloader & Boot**: `reboot_to_bootloader`, `wait_for_boot`
-- **Shell & Session**: `wait_for_shell`, `login`, `exec_command_with_status`, `check_alive`
-- **Flashing & Recovery**: `enter_recovery`, `check_recovery_mode`
-- **Telemetry & Diagnostics**: `get_network_info`, `get_system_info`
+FastMCP discovers `JetsonTarget` and registers all operations with the target prefix:
+- **Power & Reset**: `jetson_hardware_reset`, `jetson_full_reboot`, `jetson_software_reboot`, `jetson_power_button`
+- **Bootloader & Boot**: `jetson_reboot_to_bootloader`, `jetson_wait_for_boot`
+- **Shell & Session**: `jetson_wait_for_shell`, `jetson_login`, `jetson_exec_command_with_status`, `jetson_check_alive`
+- **Flashing & Recovery**: `jetson_enter_recovery`, `jetson_check_recovery_mode`
+- **Telemetry & Diagnostics**: `jetson_get_network_info`, `jetson_get_system_info`
+- **Core inherited tools**: `jetson_send_target_command`, `jetson_read_target_console`, `jetson_wait_for_console_pattern`
 - Internal hardware methods decorated with `@repl` (`trigger_reset`, `trigger_recovery`, `trigger_power_button`) are executed directly on ESP32 RAM and kept private (NOT exposed as agent tools).
 
 ---

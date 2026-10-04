@@ -30,6 +30,8 @@ from ae_hw_bridge.core.port_utils import (
 from ae_hw_bridge.daemon.protocol import (
     DEFAULT_SOCKET_PATH,
     DEFAULT_LOCK_PATH,
+    get_socket_path,
+    get_lock_path,
     Request,
     Response,
     decode_request,
@@ -558,10 +560,11 @@ def main() -> None:
         action="version",
         version=f"%(prog)s {__version__}",
     )
+    parser.add_argument("--name", default="base", help="Target or puppet identifier for scoping socket and lock")
     parser.add_argument("--control-port", default=default_ctrl, help=f"CDC0 MicroPython REPL port (default: {default_ctrl})")
     parser.add_argument("--uart-port", default=default_uart, help=f"CDC1 Target UART port (default: {default_uart})")
-    parser.add_argument("--socket-path", default=DEFAULT_SOCKET_PATH, help="Unix domain socket path")
-    parser.add_argument("--lock-path", default=DEFAULT_LOCK_PATH, help="Lockfile path")
+    parser.add_argument("--socket-path", default=None, help="Unix domain socket path (default: /tmp/ae-hw-bridge-{name}.sock)")
+    parser.add_argument("--lock-path", default=None, help="Lockfile path (default: /tmp/ae-hw-bridge-{name}.lock)")
     parser.add_argument(
         "--idle-timeout",
         type=float,
@@ -572,20 +575,23 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    effective_socket_path = args.socket_path or get_socket_path(args.name)
+    effective_lock_path = args.lock_path or get_lock_path(args.name)
+
     if args.stop:
-        stopped = stop_daemon(lock_path=args.lock_path, socket_path=args.socket_path)
+        stopped = stop_daemon(lock_path=effective_lock_path, socket_path=effective_socket_path)
         if stopped:
-            print("AE-HW-BRIDGE daemon stopped. Serial ports released.")
+            print(f"AE-HW-BRIDGE daemon '{args.name}' stopped. Serial ports released.")
         else:
-            print("No active AE-HW-BRIDGE daemon found.")
+            print(f"No active AE-HW-BRIDGE daemon found for '{args.name}'.")
         sys.exit(0)
 
     idle_timeout = None if args.idle_timeout <= 0 else args.idle_timeout
     run_daemon(
         control_port=args.control_port,
         uart_port=args.uart_port,
-        socket_path=args.socket_path,
-        lock_path=args.lock_path,
+        socket_path=effective_socket_path,
+        lock_path=effective_lock_path,
         idle_timeout=idle_timeout,
     )
 

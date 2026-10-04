@@ -48,6 +48,68 @@ class TargetLoader:
         return BaseTarget(repl=repl, console=console)
 
     @classmethod
+    def discover_target_files(cls, base_dir: Optional[Path] = None) -> dict[str, Path]:
+        """Discover target definitions in .ae-hw-bridge/targets/ or targets/ directory.
+
+        Returns:
+            Dict mapping target_name -> file_path
+        """
+        cwd = (base_dir or Path.cwd()).resolve()
+        search_dirs = [
+            cwd / ".ae-hw-bridge" / "targets",
+            cwd / "targets",
+        ]
+        results: dict[str, Path] = {}
+        for s_dir in search_dirs:
+            if s_dir.exists() and s_dir.is_dir():
+                for sub in sorted(s_dir.iterdir()):
+                    if sub.is_dir() and not sub.name.startswith((".", "_")):
+                        t_py = sub / "target.py"
+                        if t_py.exists():
+                            results[sub.name] = t_py
+                        else:
+                            py_files = [f for f in sorted(sub.glob("*.py")) if not f.name.startswith("_")]
+                            if py_files:
+                                results[sub.name] = py_files[0]
+                    elif sub.is_file() and sub.suffix == ".py" and not sub.name.startswith((".", "_")):
+                        name = sub.stem
+                        if name not in results and name != "target":
+                            results[name] = sub
+
+        if not results:
+            for s_file in [cwd / ".ae-hw-bridge" / "target.py", cwd / "target.py"]:
+                if s_file.exists():
+                    results["base"] = s_file
+                    break
+
+        return results
+
+    @classmethod
+    def load_named_target(
+        cls,
+        name: str,
+        repl: IReplClient,
+        console: IConsoleReader,
+        target_path: Optional[str] = None,
+    ) -> BaseTarget:
+        """Load target class for a named target, falling back to BaseTarget."""
+        if target_path:
+            p = Path(target_path)
+            if p.exists():
+                inst = cls._load_from_path(p, repl, console)
+                if inst:
+                    return inst
+
+        discovered = cls.discover_target_files()
+        if name in discovered:
+            inst = cls._load_from_path(discovered[name], repl, console)
+            if inst:
+                return inst
+
+        _logger.debug("No custom class for target '%s', using BaseTarget", name)
+        return BaseTarget(repl=repl, console=console)
+
+    @classmethod
     def _resolve_path(cls, target_path: Optional[str] = None) -> Optional[Path]:
         """Resolve candidate target file or directory from argument, env, or working directory."""
         candidates = []
