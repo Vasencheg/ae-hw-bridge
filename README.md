@@ -155,7 +155,7 @@ Target dev boards are configured in `.ae-hw-bridge/targets/`:
 # .ae-hw-bridge/targets/jetson/target.py
 import time
 from machine import Pin
-from ae_hw_bridge.targets.base import BaseTarget, repl, target_tool
+from ae_hw_bridge.targets.base import BaseTarget, repl
 
 class JetsonTarget(BaseTarget):
     name = "jetson"
@@ -167,7 +167,6 @@ class JetsonTarget(BaseTarget):
         time.sleep(0.2)
         rst.value(1)
 
-    @target_tool
     def full_reboot(self) -> str:
         """Perform a clean hardware reboot of the Jetson board."""
         self.reset_pulse()
@@ -181,4 +180,4 @@ class JetsonTarget(BaseTarget):
 ```bash
 pytest
 ```
-36 unit and integration tests covering the console reader, raw REPL client, IPC protocol, daemon server/client, target loader, and MCP tool registration.
+44 unit and integration tests covering the console reader, raw REPL client, IPC protocol, daemon server/client, target loader, and MCP tool registration.
