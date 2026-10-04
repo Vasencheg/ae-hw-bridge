@@ -1,0 +1,28 @@
+# Smithery configuration manifest
+# https://smithery.ai/docs/config
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      controlPort:
+        type: string
+        description: "Serial port path for CDC0 MicroPython raw REPL (default: auto-detected /dev/hw-puppet-control)"
+      uartPort:
+        type: string
+        description: "Serial port path for CDC1 target UART console (default: auto-detected /dev/hw-puppet-uart)"
+  commandFunction: |-
+    (config) => {
+      const args = ["ae-hw-bridge-mcp"];
+      if (config?.controlPort) {
+        args.push("--control-port", config.controlPort);
+      }
+      if (config?.uartPort) {
+        args.push("--uart-port", config.uartPort);
+      }
+      return {
+        command: "uvx",
+        args: args
+      };
+    }

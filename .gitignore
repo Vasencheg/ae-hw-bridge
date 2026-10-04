@@ -1,0 +1,33 @@
+# Agent harnesses & internal engine files
+.agents/
+.agents-engine/
+.claude/
+.opencode/
+.pebbles
+.pebbles/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+
+# Target local test files & runtime sockets
+*.sock
+*.lock
+.ae-hw-bridge/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
