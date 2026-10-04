@@ -60,7 +60,7 @@ When connected, agents receive the following MCP tools:
 | `wait_for_console_pattern(pattern, timeout=30.0, check_history=True)` | Wait for regex pattern on console stream (e.g. login prompt, bootloader). |
 | `clear_target_console()` | Clear the background circular console buffer. |
 | `run_custom_code(code, timeout=10.0)` | Execute custom MicroPython script in ESP32-S3 RAM via raw REPL (zero flash wear). |
-| *Custom Target Tools* | Any public method declared in `target.py` (e.g. `login`, `get_system_info`, `software_reboot`). |
+| *Custom Target Tools* | Any public method declared in `target.py` (e.g. `login`, `software_reboot`, `enter_recovery` — see [Jetson Example](examples/targets/jetson/README.md)). |
 
 ---
 
@@ -149,7 +149,20 @@ ae-hw-bridge-daemon --idle-timeout 0
 
 ## 5. Target Definitions
 
-Target dev boards are configured in `.ae-hw-bridge/targets/`:
+Target dev boards (DUTs) are configured modularly in `.ae-hw-bridge/targets/<target_name>/`.
+
+> [!TIP]
+> **Complete Target Example:**
+> See the [**NVIDIA Jetson Target Example (`examples/targets/jetson/README.md`)**](examples/targets/jetson/README.md) and its [target implementation (`target.py`)](examples/targets/jetson/target.py).
+> It provides a production-grade reference showing:
+> - Hardware reset & power button sequencing with MicroPython `@repl`
+> - Entering NVIDIA Force Recovery mode for flashing
+> - Rebooting directly to bootloader
+> - Automated Linux shell login state machine (`wait_for_shell`, `login`)
+> - Network and system telemetry retrieval (`get_network_info`, `get_system_info`)
+> - WS2812 RGB LED board status indication
+
+### Quick Minimal Target Example
 
 ```python
 # .ae-hw-bridge/targets/jetson/target.py
@@ -162,13 +175,14 @@ class JetsonTarget(BaseTarget):
 
     @repl
     def reset_pulse(self):
+        """MicroPython method executed directly in ESP32 RAM (hidden from MCP)."""
         rst = Pin(1, Pin.OUT, value=1)
         rst.value(0)
         time.sleep(0.2)
         rst.value(1)
 
     def full_reboot(self) -> str:
-        """Perform a clean hardware reboot of the Jetson board."""
+        """High-level target operation automatically registered as an MCP tool."""
         self.reset_pulse()
         return "Jetson hardware reboot initiated"
 ```
