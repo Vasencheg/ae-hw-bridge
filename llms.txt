@@ -1,0 +1,73 @@
+# ae-hw-bridge
+
+> Hardware-in-the-Loop (HIL) automation gateway and FastMCP server for AI agents.
+
+`ae-hw-bridge` connects AI coding assistants (Agents Engine, Claude, Gemini, Cursor) to physical embedded targets (ESP32, STM32, NVIDIA Jetson, Raspberry Pi) via the Model Context Protocol (MCP). It pairs with `hw-puppet`, a dual-CDC USB bridge firmware running on an ESP32-S3.
+
+## System Architecture
+
+1. **Host Computer**: Runs `ae-hw-bridge` FastMCP server and daemon on CPython 3.10+. Evaluates `target.py`.
+2. **HW-Puppet**: ESP32-S3 bridge microcontroller running MicroPython dual-CDC USB firmware:
+   - CDC 0 (`bInterfaceNumber == 00`): MicroPython Raw REPL for remote GPIO/relay control.
+   - CDC 1 (`bInterfaceNumber == 02`): Hardware UART bridge connected to Target TX/RX.
+3. **Target Board (DUT)**: Physical board under test (ESP32, STM32, Jetson, Raspberry Pi, etc.).
+
+## Automatic Discovery & Port Pairing
+
+- Linux sysfs scanning pairs CDC0 and CDC1 via parent USB device matching (USB VID `0x303a`, PID `0x4002`).
+- Multi-target setups use persistent hardware badges stored in ESP32-S3 NVS (`ae-hw-bridge label <badge>`).
+- Config file: `.ae-hw-bridge/config.yml`.
+- Never hardcode serial ports (`/dev/ttyACM*`) in MCP client configurations. Leave arguments empty (`"args": []`) for automatic discovery.
+
+## Developing Custom Targets (`target.py`)
+
+- File path: `.ae-hw-bridge/targets/<target_name>/target.py`
+- Base class: `from ae_hw_bridge.targets.base import BaseTarget, repl`
+- Tool prefixing: All public methods automatically become FastMCP tools prefixed with `<target_name>_` (e.g. `esp32_full_reboot`, `jetson_enter_recovery`).
+- Return types: Standard Python types (`dict[str, Any]`, `str`, `bool`, `int`). Never use custom wrapper classes like `TargetResult`.
+
+### The `@repl` Decorator Rules
+- `@repl` executes the decorated method's body directly inside HW-Puppet's ESP32-S3 MicroPython RAM over CDC 0 Raw REPL.
+- Methods decorated with `@repl` are low-level hardware primitives and are **hidden from MCP tools** (agents call high-level orchestrations).
+- **CRITICAL**: Never import `machine`, `neopixel`, or `esp32` at the module level! Imports that run on the MCU must be placed **inside** the `@repl` function body, because `target.py` itself is imported by CPython on the host PC.
+
+### Inherited Built-in Capabilities (`BaseTarget`)
+- `self.clear_target_console()`: Clears the background UART ring buffer.
+- `self.read_target_console(tail_lines=50, head_lines=None, grep=None)`: Reads received UART console lines.
+- `self.send_target_command(command, wait_timeout=5.0, idle_threshold=0.3)`: Sends interactive command and captures delta output.
+- `self.wait_for_console_pattern(pattern, timeout=30.0, check_history=True)`: Waits for regex match on console stream.
+- `self.run_custom_code(code, timeout=10.0)`: Executes custom MicroPython code in HW-Puppet RAM.
+- `self.get_bridge_info()`: Queries firmware build, badge, and active port paths.
+
+## Minimal Target Example
+
+```python
+from typing import Any
+from ae_hw_bridge.targets.base import BaseTarget, repl
+
+class Esp32Target(BaseTarget):
+    PIN_EN: int = 4
+    PIN_BOOT: int = 5
+
+    @repl
+    def pulse_reset(self, pin: int = 4):
+        import time
+        from machine import Pin  # Inside @repl
+        en = Pin(pin, Pin.OUT, value=1)
+        en.value(0)
+        time.sleep(0.2)
+        en.value(1)
+
+    def full_reboot(self, timeout: float = 5.0) -> dict[str, Any]:
+        """Hardware reset target ESP32 and wait for boot banner."""
+        self.clear_target_console()
+        self.pulse_reset(pin=self.PIN_EN)
+        res = self.wait_for_console_pattern(r"rst:0x|ESP-IDF|MicroPython", timeout=timeout)
+        return {"booted": res.get("matched", False), "banner": res.get("line")}
+```
+
+## Documentation Reference
+
+- Target Development Guide: `docs/target_development.md`
+- NVIDIA Jetson Reference: `examples/targets/jetson/README.md`
+- HW-Puppet ESP32-S3 Firmware: https://github.com/Vasencheg/hw-puppet

@@ -195,39 +195,38 @@ claude mcp add ae-hw-bridge uvx ae-hw-bridge
 Target dev boards (DUTs) are configured modularly in `.ae-hw-bridge/targets/<target_name>/`.
 
 > [!TIP]
-> **Complete Target Example:**
-> See the [**NVIDIA Jetson Target Example (`examples/targets/jetson/README.md`)**](examples/targets/jetson/README.md) and its [target implementation (`target.py`)](examples/targets/jetson/target.py).
-> It provides a production-grade reference showing:
-> - Hardware reset & power button sequencing with MicroPython `@repl`
-> - Entering NVIDIA Force Recovery mode for flashing
-> - Rebooting directly to bootloader
-> - Automated Linux shell login state machine (`wait_for_shell`, `login`)
-> - Network and system telemetry retrieval (`get_network_info`, `get_system_info`)
-> - WS2812 RGB LED board status indication
+> **Complete Target Guide & Examples:**
+> - See the in-depth **[Target Development Guide (`docs/target_development.md`)](docs/target_development.md)** for architecture details, `@repl` execution rules, and ready-to-use recipes for ESP32, STM32, and Linux SBCs.
+> - See the **[NVIDIA Jetson Reference Target (`examples/targets/jetson/README.md`)](examples/targets/jetson/README.md)** and its [implementation (`target.py`)](examples/targets/jetson/target.py).
+> - For AI assistants and agents, see **[`llms.txt`](llms.txt)**.
 
-### Quick Minimal Target Example
+### Quick Target Example
 
 ```python
 # .ae-hw-bridge/targets/jetson/target.py
-import time
-from machine import Pin
+from typing import Any
 from ae_hw_bridge.targets.base import BaseTarget, repl
 
 class JetsonTarget(BaseTarget):
-    name = "jetson"
+    PIN_RST: int = 12
 
     @repl
-    def reset_pulse(self):
-        """MicroPython method executed directly in ESP32 RAM (hidden from MCP)."""
-        rst = Pin(1, Pin.OUT, value=1)
+    def reset_pulse(self, pin: int = 12):
+        """MicroPython code executed directly in HW-Puppet RAM (hidden from MCP)."""
+        import time
+        from machine import Pin  # MicroPython imports MUST be inside @repl!
+
+        rst = Pin(pin, Pin.OUT, value=1)
         rst.value(0)
         time.sleep(0.2)
         rst.value(1)
 
-    def full_reboot(self) -> str:
+    def full_reboot(self, timeout: float = 30.0) -> dict[str, Any]:
         """High-level target operation automatically registered as an MCP tool."""
-        self.reset_pulse()
-        return "Jetson hardware reboot initiated"
+        self.clear_target_console()
+        self.reset_pulse(pin=self.PIN_RST)
+        res = self.wait_for_console_pattern(r"login:", timeout=timeout)
+        return {"booted": res.get("matched", False), "line": res.get("line")}
 ```
 
 ---
