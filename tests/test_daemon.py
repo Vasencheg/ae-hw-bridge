@@ -346,4 +346,46 @@ def test_daemon_signature_and_incompatible_detection() -> None:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_daemon_status_and_pty_reporting() -> None:
+    """Verify get_status and effective_pty_path returns correct information."""
+    temp_dir = tempfile.mkdtemp()
+    sock_path = os.path.join(temp_dir, "status.sock")
+    lock_path = os.path.join(temp_dir, "status.lock")
+    pty_link = os.path.join(temp_dir, "status-uart")
+
+    mock_repl = MagicMock(spec=IReplClient)
+    mock_repl.port = "/dev/ttyACM0"
+    mock_console = MagicMock(spec=IConsoleReader)
+    mock_console.port = "/dev/ttyACM1"
+    mock_console.effective_pty_path = pty_link
+
+    server = DaemonServer(
+        repl=mock_repl,
+        console=mock_console,
+        socket_path=sock_path,
+        lock_path=lock_path,
+        pty_path=pty_link,
+        name="testtarget",
+        firmware_info={"badge": "testbadge", "version": "0.2.0"},
+    )
+    server.start()
+
+    try:
+        client = DaemonIpcClient(socket_path=sock_path)
+        status = client.get_status()
+        assert status.get("status") == "ok"
+        assert status.get("name") == "testtarget"
+        assert status.get("control_port") == "/dev/ttyACM0"
+        assert status.get("uart_port") == "/dev/ttyACM1"
+        assert status.get("pty_path") == pty_link
+        assert client.effective_pty_path == pty_link
+        assert status.get("firmware_info", {}).get("badge") == "testbadge"
+    finally:
+        server.stop()
+        if os.path.exists(temp_dir):
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+
 

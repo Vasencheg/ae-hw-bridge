@@ -205,12 +205,17 @@ class BaseTarget:
 
         control_port = getattr(self.repl, "port", None) or get_default_control_port()
         uart_port = getattr(self.console, "port", None) or get_default_uart_port()
+        pty_port = getattr(self.console, "effective_pty_path", None)
+
+        ports_info = {
+            "control": control_port,
+            "uart": uart_port,
+        }
+        if pty_port:
+            ports_info["pty"] = pty_port
 
         return {
             "bridge_version": __version__,
             "firmware": firmware_info,
-            "ports": {
-                "control": control_port,
-                "uart": uart_port,
-            },
+            "ports": ports_info,
         }

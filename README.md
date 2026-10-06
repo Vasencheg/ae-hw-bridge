@@ -15,34 +15,36 @@ It pairs with the [**`hw-puppet`**](https://github.com/Vasencheg/hw-puppet) Dual
 ## 1. System Architecture
 
 ```text
-[ AI Agent / Agents Engine (ae) / Claude / Gemini / Cursor ]
-                      │
-                      │ stdio / SSE (JSON-RPC via Model Context Protocol)
-                      ▼
-         [ ae-hw-bridge FastMCP Server ]
-                      │
-                      │ Scoped Unix Domain Sockets (/tmp/ae-hw-bridge-{target}.sock)
-                      ▼
-            [ ae-hw-bridge Daemon ]
-       ├─ Bounded Circular Log Buffer (collections.deque)
-       ├─ Target Domain Logic (.ae-hw-bridge/targets/)
-       │
-       ├─── CDC 0: MicroPython Raw REPL (/dev/ttyACM* or sysfs-paired) ──┐
-       └─── CDC 1: Target UART Console  (/dev/ttyACM* or sysfs-paired) ──┐│
-                                                                         ││ (USB Full-Speed)
-                                                                         ▼▼
-                                                               [ hw-puppet (ESP32-S3) ]
-                                                               (Firmware & HIL Adapter)
-                                                                     │        │
-                                                          (Control lines)  (TX/RX UART)
-                                                                     ▼        ▼
-                                                             [ Target Dev Board ]
-                                                         (NVIDIA Jetson, Pi, STM32)
+[ AI Agent / Claude / Cursor ]          [ Human Developer (Terminal) ]
+             │                                        │
+             │ stdio / SSE (MCP JSON-RPC)             │ Virtual PTY (/tmp/ae-hw-bridge-uart)
+             ▼                                        ▼
+   [ FastMCP Server ]                    [ tio / picocom / ae-hw-bridge console ]
+             │                                        │
+             │ Scoped Unix Domain Sockets             │
+             └───────────────────┬────────────────────┘
+                                 ▼
+                     [ ae-hw-bridge Daemon ]
+             ├─ Bounded Circular Log Buffer (collections.deque)
+             ├─ Virtual Pseudoterminal Mirror (Master/Slave PTY)
+             ├─ Target Domain Logic (.ae-hw-bridge/targets/)
+             │
+             ├─── CDC 0: MicroPython Raw REPL (/dev/ttyACM* or sysfs-paired) ──┐
+             └─── CDC 1: Target UART Console  (/dev/ttyACM* or sysfs-paired) ──┐│
+                                                                               ││ (USB Full-Speed)
+                                                                               ▼▼
+                                                                     [ hw-puppet (ESP32-S3) ]
+                                                                     (Firmware & HIL Adapter)
+                                                                           │        │
+                                                                (Control lines)  (TX/RX UART)
+                                                                           ▼        ▼
+                                                                   [ Target Dev Board ]
+                                                               (NVIDIA Jetson, Pi, STM32)
 ```
 
 ### Key Principles
 * **Separation of Concerns:** Low-level hardware drivers and USB descriptors live in [`hw-puppet`](https://github.com/Vasencheg/hw-puppet), while high-level orchestration, IPC multiplexing, and MCP tools live in `ae-hw-bridge`.
-* **Zero Host Contention:** An auto-spawning, target-scoped daemon (`ae-hw-bridge-daemon`) manages exclusive access to the serial devices. Multiple agents and CLI clients connect via non-blocking Unix domain socket IPC (`/tmp/ae-hw-bridge-{target}.sock`).
+* **Zero Host Contention & Virtual PTY:** An auto-spawning, target-scoped daemon (`ae-hw-bridge-daemon`) manages exclusive access to physical serial devices and exposes a virtual pseudoterminal symlink (`/tmp/ae-hw-bridge-uart`). Developers can watch UART logs live (via `tio`, `minicom`, or `ae-hw-bridge console`) concurrently with AI agents running tasks without port collision (`Device or resource busy`).
 * **Multi-Target & Multi-Puppet:** Safely binds multiple physical boards via hardware badges (stored in ESP32-S3 NVS) and Linux sysfs USB pairing without serial port number guessing or symlink collisions.
 * **Agent Safety:** Internal `@repl` methods are filtered out from MCP exposure; agents interact strictly through vetted, high-level business tools (`full_reboot`, `login`, `send_target_command`, `wait_for_console_pattern`, etc.).
 * **Dynamic Target Loading:** Target behavior (pin definitions, boot sequences, login credentials) is defined modularly under `.ae-hw-bridge/targets/<target_name>/target.py` or `.ae-hw-bridge/config.yml`.
@@ -107,11 +109,36 @@ targets:
 
 ---
 
-## 4. CLI Utilities
+## 4. CLI Utilities & Virtual UART Console
 
-`ae-hw-bridge` provides built-in CLI commands for managing hardware test benches:
+`ae-hw-bridge` provides built-in CLI commands for managing hardware test benches and viewing UART logs without serial port contention:
 
 ```bash
+# Connect to live target UART console (interactive terminal session via tio / picocom / built-in)
+ae-hw-bridge console
+
+# Inspect recent UART console logs (non-interactive, exit immediately)
+ae-hw-bridge console -n 50
+
+# Continuously follow live console logs
+ae-hw-bridge console -f
+
+# Filter and pipe live output into standard Unix tools
+ae-hw-bridge console | grep "ERROR"
+ae-hw-bridge console -n 100 --grep "kernel"
+
+# External terminal access (works simultaneously with AI agents!):
+# Use your favorite terminal tool directly via the virtual PTY symlink:
+tio /tmp/ae-hw-bridge-uart
+picocom -b 115200 /tmp/ae-hw-bridge-uart
+
+# View daemon status, connected MCP clients, physical ports, and virtual PTY
+ae-hw-bridge status
+
+# Stop background daemons and release serial ports
+ae-hw-bridge stop
+ae-hw-bridge stop --all
+
 # List all connected HW-Puppet devices, serial numbers, badges, and configured targets
 ae-hw-bridge list
 
@@ -121,11 +148,11 @@ ae-hw-bridge label stm32-bench --port /dev/ttyACM1
 
 # Run the FastMCP server
 ae-hw-bridge
-
-# Stop a running background daemon and release serial ports
-ae-hw-bridge-daemon --stop
-ae-hw-bridge-daemon --name jetson --stop
 ```
+
+> [!TIP]
+> * For full command-line usage and daemon management, see the [CLI Reference Guide](docs/cli.md).
+> * For in-depth architectural details, virtual PTY sharing, and external terminal setup (`tio`, `minicom`), see the [Virtual UART Console Guide](docs/virtual_console.md).
 
 ---
 

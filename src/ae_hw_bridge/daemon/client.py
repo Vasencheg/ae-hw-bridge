@@ -30,6 +30,7 @@ from ae_hw_bridge.daemon.protocol import (
     DEFAULT_SPAWN_LOCK_PATH,
     get_socket_path,
     get_spawn_lock_path,
+    get_pty_path,
     Request,
     Response,
     encode_request,
@@ -122,6 +123,21 @@ class DaemonIpcClient(IReplClient, IConsoleReader):
         except Exception:
             pass
         return None
+
+    def get_status(self) -> dict[str, Any]:
+        """Query detailed status payload from the running daemon."""
+        try:
+            res = self.call("ping", timeout=2.0)
+            if isinstance(res, dict):
+                return res
+        except Exception:
+            pass
+        return {}
+
+    @property
+    def effective_pty_path(self) -> Optional[str]:
+        """Return the virtual UART PTY symlink path reported by the daemon."""
+        return self.get_status().get("pty_path")
 
     def is_compatible(self) -> bool:
         """Check if running daemon matches the current client version and code signature."""
@@ -282,6 +298,7 @@ def ensure_daemon_running(
     name: Optional[str] = None,
     socket_path: Optional[str] = None,
     spawn_lock_path: Optional[str] = None,
+    pty_path: Optional[str] = None,
     idle_timeout: float = 30.0,
 ) -> DaemonIpcClient:
     """Check if daemon is running; if not or if outdated, spawn it in background and wait until responsive."""
@@ -290,6 +307,7 @@ def ensure_daemon_running(
     eff_name = name or "base"
     eff_socket_path = socket_path or get_socket_path(eff_name)
     eff_spawn_lock = spawn_lock_path or get_spawn_lock_path(eff_name)
+    eff_pty = pty_path or get_pty_path(eff_name)
     eff_ctrl = control_port or get_default_control_port()
     eff_uart = uart_port or get_default_uart_port()
 
@@ -341,6 +359,8 @@ def ensure_daemon_running(
             eff_uart,
             "--socket-path",
             eff_socket_path,
+            "--pty-path",
+            eff_pty,
             "--idle-timeout",
             str(idle_timeout),
         ]

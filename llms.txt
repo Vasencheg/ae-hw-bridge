@@ -66,8 +66,21 @@ class Esp32Target(BaseTarget):
         return {"booted": res.get("matched", False), "banner": res.get("line")}
 ```
 
+## Virtual UART Console & Concurrent Access
+
+- Host daemon creates virtual PTY symlink `/tmp/ae-hw-bridge-uart` (and `/tmp/ae-hw-bridge-<target>-uart`).
+- Developers can safely run `tio /tmp/ae-hw-bridge-uart` or `ae-hw-bridge console` in parallel with AI agents without port collision errors (`Device or resource busy`).
+- CLI utilities:
+  - `ae-hw-bridge console`: Interactive terminal (tio/picocom/built-in), tail (`-n 50`), follow (`-f`), and pipeable (`| grep`).
+  - `ae-hw-bridge status`: Inspect running daemons, PID, uptime, active MCP clients, and virtual PTY.
+  - `ae-hw-bridge stop`: Gracefully stops background daemons and releases serial ports.
+  - `ae-hw-bridge list`: Scans USB sysfs for connected HW-Puppet boards.
+  - `ae-hw-bridge label <badge>`: Sets persistent badge in ESP32-S3 NVS.
+
 ## Documentation Reference
 
+- CLI Reference Guide: `docs/cli.md`
+- Virtual UART Console Guide: `docs/virtual_console.md`
 - Target Development Guide: `docs/target_development.md`
 - NVIDIA Jetson Reference: `examples/targets/jetson/README.md`
 - HW-Puppet ESP32-S3 Firmware: https://github.com/Vasencheg/hw-puppet

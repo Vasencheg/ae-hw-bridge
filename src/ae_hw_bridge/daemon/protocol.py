@@ -35,9 +35,18 @@ def get_spawn_lock_path(name: Optional[str] = None) -> str:
     return f"/tmp/ae-hw-bridge-{safe}-spawn.lock"
 
 
+def get_pty_path(name: Optional[str] = None) -> str:
+    """Return target-scoped virtual UART PTY symlink path."""
+    if not name or name == "base":
+        return "/tmp/ae-hw-bridge-uart"
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)
+    return f"/tmp/ae-hw-bridge-{safe}-uart"
+
+
 DEFAULT_SOCKET_PATH = get_socket_path("base")
 DEFAULT_LOCK_PATH = get_lock_path("base")
 DEFAULT_SPAWN_LOCK_PATH = get_spawn_lock_path("base")
+DEFAULT_PTY_PATH = get_pty_path("base")
 
 
 def get_daemon_signature() -> str:

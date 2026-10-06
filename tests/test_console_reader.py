@@ -168,3 +168,67 @@ def test_console_reader_reconnect_on_error() -> None:
         reader.stop()
 
     assert call_count >= 2
+
+
+def test_console_reader_pty_setup_and_cleanup() -> None:
+    import os
+    import tempfile
+
+    temp_dir = tempfile.mkdtemp()
+    test_link = os.path.join(temp_dir, "test-pty-uart")
+
+    reader = ConsoleReader(port="/dev/mock", pty_path=test_link, enable_pty=True)
+    try:
+        reader._setup_pty()
+        assert reader._pty_master_fd is not None
+        assert reader._pty_slave_fd is not None
+        assert reader._pty_slave_name is not None
+        assert os.path.exists(reader._pty_slave_name)
+        assert os.path.islink(test_link)
+        assert os.readlink(test_link) == reader._pty_slave_name
+        assert reader.effective_pty_path == test_link
+    finally:
+        reader._cleanup_pty()
+        assert not os.path.exists(test_link)
+        assert reader._pty_master_fd is None
+        assert reader._pty_slave_fd is None
+        if os.path.exists(temp_dir):
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_console_reader_pty_bidirectional_data() -> None:
+    import os
+    import tempfile
+
+    temp_dir = tempfile.mkdtemp()
+    test_link = os.path.join(temp_dir, "test-data-uart")
+
+    reader = ConsoleReader(port="/dev/mock", pty_path=test_link, enable_pty=True)
+    mock_serial = MagicMock()
+    mock_serial.is_open = True
+    mock_serial.write.return_value = 5
+    reader._serial = mock_serial
+
+    try:
+        reader._setup_pty()
+        assert reader._pty_slave_fd is not None
+
+        # 1. Test input from human terminal: writing to slave fd forwards to serial.write()
+        os.write(reader._pty_slave_fd, b"hello\n")
+        time.sleep(0.15)
+        mock_serial.write.assert_called_with(b"hello\n")
+
+        # 2. Test output from physical UART: writing to master fd makes it readable on slave fd
+        assert reader._pty_master_fd is not None
+        os.write(reader._pty_master_fd, b"kernel boot\r\n")
+        time.sleep(0.05)
+        received = os.read(reader._pty_slave_fd, 1024)
+        assert b"kernel boot\r\n" in received
+    finally:
+        reader._stop_event.set()
+        reader._cleanup_pty()
+        if os.path.exists(temp_dir):
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+

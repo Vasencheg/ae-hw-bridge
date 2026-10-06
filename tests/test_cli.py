@@ -1,0 +1,128 @@
+"""Unit tests for ae-hw-bridge CLI subcommands (status, stop, console)."""
+
+import os
+import sys
+import io
+import tempfile
+import pytest
+from unittest.mock import MagicMock, patch
+
+from ae_hw_bridge.mcp.server import cmd_status, cmd_stop, cmd_console
+from ae_hw_bridge.core.interfaces import IReplClient, IConsoleReader
+from ae_hw_bridge.daemon.server import DaemonServer
+
+
+def test_cmd_status_no_daemons(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[]):
+        cmd_status([])
+    captured = capsys.readouterr()
+    assert "No active AE-HW-BRIDGE daemons running" in captured.out
+
+
+def test_cmd_status_with_active_daemon(capsys: pytest.CaptureFixture[str]) -> None:
+    temp_dir = tempfile.mkdtemp()
+    sock_path = "/tmp/ae-hw-bridge-testcli.sock"
+    lock_path = "/tmp/ae-hw-bridge-testcli.lock"
+    pty_link = "/tmp/ae-hw-bridge-testcli-uart"
+
+    mock_repl = MagicMock(spec=IReplClient)
+    mock_repl.port = "/dev/ttyACM0"
+    mock_console = MagicMock(spec=IConsoleReader)
+    mock_console.port = "/dev/ttyACM1"
+    mock_console.effective_pty_path = pty_link
+
+    server = DaemonServer(
+        repl=mock_repl,
+        console=mock_console,
+        socket_path=sock_path,
+        lock_path=lock_path,
+        pty_path=pty_link,
+        name="testcli",
+        firmware_info={"badge": "clibadge", "version": "0.2.0"},
+    )
+    server.start()
+
+    try:
+        cmd_status(["-t", "testcli"])
+        captured = capsys.readouterr()
+        assert "Target:          testcli" in captured.out
+        assert "/dev/ttyACM0" in captured.out
+        assert "/dev/ttyACM1" in captured.out
+        assert pty_link in captured.out
+        assert "clibadge" in captured.out
+
+        # Test JSON format
+        cmd_status(["-t", "testcli", "--json"])
+        captured_json = capsys.readouterr()
+        assert '"target": "testcli"' in captured_json.out
+    finally:
+        server.stop()
+        for p in (sock_path, lock_path, pty_link):
+            if os.path.islink(p) or os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+        if os.path.exists(temp_dir):
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_cmd_stop(capsys: pytest.CaptureFixture[str]) -> None:
+    sock_path = "/tmp/ae-hw-bridge-teststop.sock"
+    lock_path = "/tmp/ae-hw-bridge-teststop.lock"
+    pty_link = "/tmp/ae-hw-bridge-teststop-uart"
+
+    mock_repl = MagicMock(spec=IReplClient)
+    mock_console = MagicMock(spec=IConsoleReader)
+
+    server = DaemonServer(
+        repl=mock_repl,
+        console=mock_console,
+        socket_path=sock_path,
+        lock_path=lock_path,
+        pty_path=pty_link,
+        name="teststop",
+    )
+    server.start()
+
+    try:
+        cmd_stop(["-t", "teststop"])
+        captured = capsys.readouterr()
+        assert "AE-HW-BRIDGE daemon 'teststop' stopped" in captured.out
+        assert not os.path.exists(sock_path)
+        assert not os.path.exists(lock_path)
+    finally:
+        server.stop()
+        for p in (sock_path, lock_path, pty_link):
+            if os.path.islink(p) or os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
+def test_cmd_console_tail(capsys: pytest.CaptureFixture[str]) -> None:
+    mock_client = MagicMock()
+    mock_client.get_lines.return_value = ["line 1", "line 2", "line 3"]
+
+    with patch("ae_hw_bridge.mcp.server._get_or_start_daemon", return_value=mock_client):
+        cmd_console(["-n", "3", "-t", "testtarget"])
+
+    mock_client.get_lines.assert_called_once_with(tail_lines=3, grep=None)
+    captured = capsys.readouterr()
+    assert "line 1\nline 2\nline 3" in captured.out
+
+
+def test_cmd_console_interactive(capsys: pytest.CaptureFixture[str]) -> None:
+    mock_client = MagicMock()
+    mock_client.effective_pty_path = "/tmp/mock-pty"
+
+    with patch("ae_hw_bridge.mcp.server._get_or_start_daemon", return_value=mock_client), \
+         patch("sys.stdout.isatty", return_value=True), \
+         patch("sys.stdin.isatty", return_value=True), \
+         patch("os.path.exists", return_value=True), \
+         patch("ae_hw_bridge.mcp.server._run_builtin_terminal") as mock_terminal:
+        cmd_console(["--builtin", "-t", "testtarget"])
+
+    mock_terminal.assert_called_once_with("/tmp/mock-pty")

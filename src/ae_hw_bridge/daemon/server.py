@@ -27,11 +27,14 @@ from ae_hw_bridge.core.port_utils import (
     check_hw_puppet_connection,
     check_firmware_handshake,
 )
+from ae_hw_bridge import __version__
 from ae_hw_bridge.daemon.protocol import (
     DEFAULT_SOCKET_PATH,
     DEFAULT_LOCK_PATH,
+    DEFAULT_PTY_PATH,
     get_socket_path,
     get_lock_path,
+    get_pty_path,
     Request,
     Response,
     decode_request,
@@ -51,14 +54,18 @@ class DaemonServer:
         console: IConsoleReader,
         socket_path: str = DEFAULT_SOCKET_PATH,
         lock_path: str = DEFAULT_LOCK_PATH,
+        pty_path: Optional[str] = None,
         idle_timeout: Optional[float] = 30.0,
         firmware_info: Optional[dict[str, Any]] = None,
+        name: str = "base",
     ) -> None:
         self.repl = repl
         self.console = console
         self.socket_path = socket_path
         self.lock_path = lock_path
+        self.pty_path = pty_path
         self.idle_timeout = idle_timeout
+        self.name = name
         self._firmware_info = firmware_info
         self._lock_fd: Optional[int] = None
         self._server_sock: Optional[socket.socket] = None
@@ -76,6 +83,8 @@ class DaemonServer:
         # Command dispatch map
         self._handlers: Dict[str, Callable[[dict[str, Any]], Any]] = {
             "ping": self._handle_ping,
+            "status": self._handle_ping,
+            "get_status": self._handle_ping,
             "run_custom_code": self._handle_run_custom_code,
             "clear_target_console": self._handle_clear_target_console,
             "read_target_console": self._handle_read_target_console,
@@ -328,11 +337,18 @@ class DaemonServer:
     # --- Handlers ---
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
+        effective_pty = getattr(self.console, "effective_pty_path", None) or getattr(self.console, "pty_path", None)
         return {
             "status": "ok",
+            "name": self.name,
             "version": get_daemon_signature(),
+            "package_version": __version__,
             "uptime": round(time.time() - self._start_time, 2),
             "clients_count": len(self._clients),
+            "control_port": getattr(self.repl, "port", None),
+            "uart_port": getattr(self.console, "port", None),
+            "pty_path": effective_pty,
+            "firmware_info": self._firmware_info,
         }
 
     def _handle_shutdown(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -450,8 +466,12 @@ class DaemonServer:
         return self._firmware_info
 
 
-def stop_daemon(lock_path: str = DEFAULT_LOCK_PATH, socket_path: str = DEFAULT_SOCKET_PATH) -> bool:
-    """Find and stop a running daemon process, releasing all ports."""
+def stop_daemon(
+    lock_path: str = DEFAULT_LOCK_PATH,
+    socket_path: str = DEFAULT_SOCKET_PATH,
+    pty_path: Optional[str] = None,
+) -> bool:
+    """Find and stop a running daemon process, releasing all ports and PTY symlinks."""
     pid = None
     if os.path.exists(lock_path):
         try:
@@ -463,29 +483,32 @@ def stop_daemon(lock_path: str = DEFAULT_LOCK_PATH, socket_path: str = DEFAULT_S
             pass
 
     stopped = False
-    if pid is not None and pid != os.getpid():
-        try:
-            os.kill(pid, signal.SIGTERM)
-            for _ in range(25):
-                time.sleep(0.1)
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    stopped = True
-                    break
-            if not stopped:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                    time.sleep(0.1)
-                    stopped = True
-                except OSError:
-                    stopped = True
-        except ProcessLookupError:
+    if pid is not None:
+        if pid == os.getpid():
             stopped = True
-        except Exception as e:
-            print(f"Error stopping daemon PID {pid}: {e}", file=sys.stderr)
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(25):
+                    time.sleep(0.1)
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        stopped = True
+                        break
+                if not stopped:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        time.sleep(0.1)
+                        stopped = True
+                    except OSError:
+                        stopped = True
+            except ProcessLookupError:
+                stopped = True
+            except Exception as e:
+                print(f"Error stopping daemon PID {pid}: {e}", file=sys.stderr)
 
-    # Clean up socket and lock files
+    # Clean up socket, lock, and virtual PTY symlink files
     if os.path.exists(socket_path):
         try:
             os.unlink(socket_path)
@@ -494,6 +517,12 @@ def stop_daemon(lock_path: str = DEFAULT_LOCK_PATH, socket_path: str = DEFAULT_S
     if os.path.exists(lock_path):
         try:
             os.unlink(lock_path)
+        except OSError:
+            pass
+    eff_pty = pty_path or DEFAULT_PTY_PATH
+    if eff_pty and (os.path.islink(eff_pty) or os.path.exists(eff_pty)):
+        try:
+            os.unlink(eff_pty)
         except OSError:
             pass
 
@@ -505,16 +534,19 @@ def run_daemon(
     uart_port: Optional[str] = None,
     socket_path: str = DEFAULT_SOCKET_PATH,
     lock_path: str = DEFAULT_LOCK_PATH,
+    pty_path: Optional[str] = None,
     idle_timeout: Optional[float] = 30.0,
+    name: str = "base",
 ) -> None:
     """Run daemon process until SIGINT/SIGTERM or idle timeout."""
     eff_ctrl = control_port or get_default_control_port()
     eff_uart = uart_port or get_default_uart_port()
+    eff_pty = pty_path or get_pty_path(name)
 
     check_hw_puppet_connection(eff_ctrl, eff_uart)
 
     repl = ReplClient(port=eff_ctrl)
-    console = ConsoleReader(port=eff_uart)
+    console = ConsoleReader(port=eff_uart, pty_path=eff_pty)
 
     # Perform active serial handshake to verify compatible hw-puppet firmware
     fw_info = check_firmware_handshake(repl)
@@ -524,8 +556,10 @@ def run_daemon(
         console=console,
         socket_path=socket_path,
         lock_path=lock_path,
+        pty_path=eff_pty,
         idle_timeout=idle_timeout,
         firmware_info=fw_info,
+        name=name,
     )
 
     stop_event = threading.Event()
@@ -565,6 +599,7 @@ def main() -> None:
     parser.add_argument("--uart-port", default=default_uart, help=f"CDC1 Target UART port (default: {default_uart})")
     parser.add_argument("--socket-path", default=None, help="Unix domain socket path (default: /tmp/ae-hw-bridge-{name}.sock)")
     parser.add_argument("--lock-path", default=None, help="Lockfile path (default: /tmp/ae-hw-bridge-{name}.lock)")
+    parser.add_argument("--pty-path", default=None, help="Virtual UART PTY path (default: /tmp/ae-hw-bridge-{name}-uart)")
     parser.add_argument(
         "--idle-timeout",
         type=float,
@@ -577,9 +612,14 @@ def main() -> None:
 
     effective_socket_path = args.socket_path or get_socket_path(args.name)
     effective_lock_path = args.lock_path or get_lock_path(args.name)
+    effective_pty_path = args.pty_path or get_pty_path(args.name)
 
     if args.stop:
-        stopped = stop_daemon(lock_path=effective_lock_path, socket_path=effective_socket_path)
+        stopped = stop_daemon(
+            lock_path=effective_lock_path,
+            socket_path=effective_socket_path,
+            pty_path=effective_pty_path,
+        )
         if stopped:
             print(f"AE-HW-BRIDGE daemon '{args.name}' stopped. Serial ports released.")
         else:
@@ -592,7 +632,9 @@ def main() -> None:
         uart_port=args.uart_port,
         socket_path=effective_socket_path,
         lock_path=effective_lock_path,
+        pty_path=args.pty_path,
         idle_timeout=idle_timeout,
+        name=args.name,
     )
 
 
