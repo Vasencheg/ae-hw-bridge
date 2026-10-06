@@ -201,12 +201,13 @@ def cmd_label_device(badge: str, port: Optional[str] = None) -> None:
         puppet = resolve_puppet(probe_badges=False)
         target_port = puppet.control_port
 
-    print(f"Connecting to {target_port} to set badge '{badge}'...")
+    action_msg = f"set badge '{badge}'" if badge else "clear persistent badge"
+    print(f"Connecting to {target_port} to {action_msg}...")
     try:
         ser = serial.Serial(target_port, 115200, timeout=1.5)
     except Exception as e:
         print(f"Error opening port {target_port}: {e}")
-        print("Tip: If a daemon is running, stop it with: ae-hw-bridge daemon --stop")
+        print("Tip: If a daemon is running, stop it with: ae-hw-bridge stop")
         sys.exit(1)
 
     try:
@@ -230,7 +231,10 @@ def cmd_label_device(badge: str, port: Optional[str] = None) -> None:
             print(f"Error executing on board (response: {header})")
             sys.exit(1)
 
-        print(f"[{target_port}] Persistent badge successfully set to: '{badge}'")
+        if not badge:
+            print(f"[{target_port}] Persistent badge successfully cleared (erased from NVS).")
+        else:
+            print(f"[{target_port}] Persistent badge successfully set to: '{badge}'")
     finally:
         try:
             ser.write(b"\x02")
@@ -298,10 +302,17 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
         # Daemon not answering; validate target against connected hardware badges
         puppets = scan_hw_puppets(probe_badges=True)
 
-        # 1. Match by hardware badge or serial
+        # 1. Match by hardware badge or serial or port
         for p in puppets:
-            if p.badge == eff_name or p.serial == eff_name:
+            if (
+                p.badge == eff_name
+                or p.serial == eff_name
+                or p.control_port == eff_name
+                or os.path.basename(p.control_port) == eff_name
+                or (p.uart_port and (p.uart_port == eff_name or os.path.basename(p.uart_port) == eff_name))
+            ):
                 matched_puppet = p
+                eff_name = matched_puppet.badge or eff_name.replace("/dev/", "").replace("/", "_")
                 break
 
         # 2. Match unbadged single device if requested 'base' or 'default'
@@ -309,6 +320,7 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
             unbadged = [p for p in puppets if not p.badge]
             if len(unbadged) == 1:
                 matched_puppet = unbadged[0]
+                eff_name = "base"
 
         # 3. Match from local config.yml if user configured an explicit target alias
         if not matched_puppet and cfg.targets and eff_name in cfg.targets:
@@ -692,11 +704,21 @@ def main() -> None:
             cmd_list_devices()
             return
         elif cmd == "label":
-            sub_parser = argparse.ArgumentParser(prog="ae-hw-bridge label", description="Assign persistent badge to HW-Puppet board")
-            sub_parser.add_argument("badge", help="Badge identifier to store in NVS (e.g. 'jetson', 'stm32')")
+            sub_parser = argparse.ArgumentParser(
+                prog="ae-hw-bridge label",
+                description="Assign or clear persistent badge on HW-Puppet board",
+            )
+            sub_parser.add_argument("badge", nargs="?", default=None, help="Badge identifier to store in NVS (e.g. 'jetson', 'stm32')")
+            sub_parser.add_argument("--clear", "--delete", action="store_true", help="Erase badge from NVS storage")
             sub_parser.add_argument("--port", default=None, help="CDC0 port (default: auto-detected)")
             sub_args = sub_parser.parse_args(sys.argv[2:])
-            cmd_label_device(badge=sub_args.badge, port=sub_args.port)
+            if sub_args.clear:
+                badge_val = ""
+            elif sub_args.badge is not None:
+                badge_val = sub_args.badge
+            else:
+                sub_parser.error("Specify a badge name (e.g. 'ae-hw-bridge label jetson') or use --clear to erase the badge.")
+            cmd_label_device(badge=badge_val, port=sub_args.port)
             return
         elif cmd == "daemon":
             from ae_hw_bridge.daemon.server import main as daemon_main

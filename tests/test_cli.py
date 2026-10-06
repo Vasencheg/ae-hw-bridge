@@ -221,3 +221,38 @@ def test_daemon_resolution_multiple_puppets_error(capsys: pytest.CaptureFixture[
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "Multiple HW-Puppet devices connected ('jetson', 'rockchip')" in captured.err
+
+
+def test_daemon_resolution_by_port(capsys: pytest.CaptureFixture[str]) -> None:
+    puppet = HWPuppetDevice(
+        serial="serial123",
+        control_port="/dev/ttyACM0",
+        uart_port="/dev/ttyACM1",
+        sysfs_path="",
+        badge="",
+    )
+    with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[puppet]), \
+         patch("pathlib.Path.glob", return_value=[]), \
+         patch("ae_hw_bridge.mcp.server.ensure_daemon_running") as mock_ensure:
+        mock_client = MagicMock()
+        mock_ensure.return_value = mock_client
+        res = _get_or_start_daemon("/dev/ttyACM0")
+        assert res == mock_client
+        mock_ensure.assert_called_once_with(
+            name="ttyACM0",
+            control_port="/dev/ttyACM0",
+            uart_port="/dev/ttyACM1",
+        )
+
+
+def test_cmd_label_clear(capsys: pytest.CaptureFixture[str]) -> None:
+    from ae_hw_bridge.mcp.server import cmd_label_device
+    mock_serial = MagicMock()
+    mock_serial.read_until.return_value = b"raw REPL; CTRL-B to exit\r\n>"
+    mock_serial.read.return_value = b"OK"
+
+    with patch("serial.Serial", return_value=mock_serial):
+        cmd_label_device(badge="", port="/dev/ttyACM0")
+
+    captured = capsys.readouterr()
+    assert "Persistent badge successfully cleared" in captured.out

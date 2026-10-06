@@ -187,12 +187,17 @@ Found 1 connected HW-Puppet device(s):
 
 ## 6. `ae-hw-bridge label`
 
-Writes a persistent hardware badge string to ESP32-S3 Non-Volatile Storage (NVS). This allows automatic, fail-safe port binding in multi-target test benches.
+Writes or clears a persistent hardware badge string in ESP32-S3 Non-Volatile Storage (NVS). This allows automatic, fail-safe port binding and target matching in multi-target test benches.
 
 ### Usage
 ```bash
-ae-hw-bridge label <BADGE> [--port <CDC0_PORT>]
+ae-hw-bridge label [<BADGE>] [--clear] [--port <CDC0_PORT>]
 ```
+
+### Options
+* `<BADGE>`: Identifier to assign in NVS (e.g. `jetson`, `rockchip`, `stm32`).
+* `--clear`, `--delete`: Erases the badge from ESP32-S3 NVS storage (returns board to unbadged `<not set>` state).
+* `--port <PORT>`: Explicit CDC0 control port (default: auto-detected).
 
 ### Examples
 ```bash
@@ -202,7 +207,12 @@ Connecting to /dev/ttyACM0 to set badge 'jetson'...
 [/dev/ttyACM0] Persistent badge successfully set to: 'jetson'
 
 # Assign badge using explicit port:
-$ ae-hw-bridge label stm32-bench --port /dev/ttyACM2
+$ ae-hw-bridge label stm32 --port /dev/ttyACM2
+
+# Erase/delete badge from board:
+$ ae-hw-bridge label --clear
+Connecting to /dev/ttyACM0 to clear persistent badge...
+[/dev/ttyACM0] Persistent badge successfully cleared (erased from NVS).
 ```
 
 ---
