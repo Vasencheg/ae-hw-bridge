@@ -474,8 +474,20 @@ def cmd_console(args_list: list[str]) -> None:
     tail_count = args.lines if args.lines is not None else 50
     should_follow = args.follow or (not is_interactive_tty and args.lines is None)
 
-    if tail_count > 0:
+    try:
+        total_in_buffer = int(client.get_total_lines_count())
+    except (TypeError, ValueError):
+        total_in_buffer = 1
+
+    if total_in_buffer == 0 and not should_follow:
+        print("[ae-hw-bridge] Console buffer is empty (target has not produced any output yet).", file=sys.stderr)
+        print("[ae-hw-bridge] Tip: Run 'ae-hw-bridge console' to open an interactive session and wake up the target prompt.", file=sys.stderr)
+        return
+
+    if tail_count > 0 and total_in_buffer > 0:
         lines = client.get_lines(tail_lines=tail_count, grep=args.grep)
+        if not lines and args.grep and not should_follow and sys.stderr.isatty():
+            print(f"[ae-hw-bridge] No buffered lines matched pattern '{args.grep}'.", file=sys.stderr)
         for line in lines:
             print(line, flush=True)
 
@@ -483,6 +495,14 @@ def cmd_console(args_list: list[str]) -> None:
         return
 
     # Continuously follow live console output
+    if sys.stderr.isatty():
+        if total_in_buffer == 0:
+            print("[ae-hw-bridge] Console buffer is empty. Streaming live console output (Ctrl-C to stop)...", file=sys.stderr)
+        elif args.grep:
+            print(f"[ae-hw-bridge] Streaming live console output matching '{args.grep}' (Ctrl-C to stop)...", file=sys.stderr)
+        else:
+            print("[ae-hw-bridge] Streaming live console output (Ctrl-C to stop)...", file=sys.stderr)
+
     total_count = client.get_total_lines_count()
     try:
         while True:

@@ -13,7 +13,8 @@ from ae_hw_bridge.daemon.server import DaemonServer
 
 
 def test_cmd_status_no_daemons(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[]):
+    with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[]), \
+         patch("ae_hw_bridge.daemon.client.DaemonIpcClient.get_status", return_value=None):
         cmd_status([])
     captured = capsys.readouterr()
     assert "No active AE-HW-BRIDGE daemons running" in captured.out
@@ -136,3 +137,29 @@ def test_cmd_console_invalid_target_rejected(capsys: pytest.CaptureFixture[str])
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "Error: Target 'non_existent_target' not found" in captured.err
+
+
+def test_cmd_console_empty_buffer_notice(capsys: pytest.CaptureFixture[str]) -> None:
+    mock_client = MagicMock()
+    mock_client.get_total_lines_count.return_value = 0
+
+    with patch("ae_hw_bridge.mcp.server._get_or_start_daemon", return_value=mock_client):
+        cmd_console(["-n", "50", "-t", "testtarget"])
+
+    mock_client.get_lines.assert_not_called()
+    captured = capsys.readouterr()
+    assert "Console buffer is empty" in captured.err
+    assert captured.out == ""
+
+
+def test_cmd_console_streaming_notice(capsys: pytest.CaptureFixture[str]) -> None:
+    mock_client = MagicMock()
+    mock_client.get_total_lines_count.return_value = 0
+
+    with patch("ae_hw_bridge.mcp.server._get_or_start_daemon", return_value=mock_client), \
+         patch("sys.stderr.isatty", return_value=True), \
+         patch("time.sleep", side_effect=KeyboardInterrupt):
+        cmd_console(["-f", "-t", "testtarget"])
+
+    captured = capsys.readouterr()
+    assert "Streaming live console output" in captured.err
