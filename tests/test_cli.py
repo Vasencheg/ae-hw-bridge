@@ -126,3 +126,13 @@ def test_cmd_console_interactive(capsys: pytest.CaptureFixture[str]) -> None:
         cmd_console(["--builtin", "-t", "testtarget"])
 
     mock_terminal.assert_called_once_with("/tmp/mock-pty")
+
+
+def test_cmd_console_invalid_target_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[]), \
+         pytest.raises(SystemExit) as exc_info:
+        cmd_console(["-t", "non_existent_target"])
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Error: Target 'non_existent_target' not found" in captured.err

@@ -271,6 +271,40 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
             eff_name = next(iter(cfg.targets.keys()))
         else:
             eff_name = "base"
+    else:
+        # User specified an explicit target name: check if daemon is running
+        sock_path = get_socket_path(eff_name)
+        client = DaemonIpcClient(socket_path=sock_path)
+        if client.ping():
+            return client
+
+        # Validate target existence before attempting to spawn
+        valid_targets: set[str] = set()
+        if cfg.targets:
+            valid_targets.update(cfg.targets.keys())
+        discovered = TargetLoader.discover_target_files()
+        if discovered:
+            valid_targets.update(discovered.keys())
+        if not valid_targets:
+            valid_targets.add("base")
+            valid_targets.add("default")
+        else:
+            valid_targets.add("base")
+
+        try:
+            puppets = scan_hw_puppets(probe_badges=True)
+            for p in puppets:
+                if p.badge:
+                    valid_targets.add(p.badge)
+        except Exception:
+            pass
+
+        if eff_name not in valid_targets:
+            print(f"Error: Target '{eff_name}' not found.", file=sys.stderr)
+            display_targets = sorted(t for t in valid_targets if t != "default")
+            if display_targets:
+                print(f"Available targets: {', '.join(display_targets)}", file=sys.stderr)
+            sys.exit(1)
 
     sock_path = get_socket_path(eff_name)
     client = DaemonIpcClient(socket_path=sock_path)
@@ -288,6 +322,8 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
             ctrl_port = t_cfg.port or cfg.port
             uart_port = t_cfg.uart_port or cfg.uart_port
             puppet_id = t_cfg.puppet or cfg.puppet
+        elif eff_name not in ("base", "default"):
+            puppet_id = eff_name
         elif cfg.port or cfg.uart_port:
             ctrl_port = cfg.port
             uart_port = cfg.uart_port
@@ -331,13 +367,22 @@ def _run_builtin_terminal(pty_path: str) -> None:
 
     stdin_fd = sys.stdin.fileno()
     stdout_fd = sys.stdout.fileno()
-    old_settings = termios.tcgetattr(stdin_fd)
+    old_stdin_settings = termios.tcgetattr(stdin_fd)
+    old_pty_settings = None
 
     print(f"\r\n=== Connected to UART Console: {pty_path} ===")
     print("=== Press Ctrl-] or Ctrl-Q to exit ===\r\n", flush=True)
 
     try:
+        # Put user's stdin into raw mode
         tty.setraw(stdin_fd)
+        # Put PTY slave into raw mode (disable canonical buffering, local echo, flow control locks)
+        try:
+            old_pty_settings = termios.tcgetattr(fd)
+            tty.setraw(fd)
+        except Exception:
+            pass
+
         while True:
             r, _, _ = select.select([stdin_fd, fd], [], [])
             if stdin_fd in r:
@@ -355,12 +400,18 @@ def _run_builtin_terminal(pty_path: str) -> None:
                     break
                 if not data:
                     break
-                os.write(stdout_fd, data)
+                formatted = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                os.write(stdout_fd, formatted)
     finally:
         try:
-            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_settings)
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_stdin_settings)
         except Exception:
             pass
+        if old_pty_settings is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_pty_settings)
+            except Exception:
+                pass
         try:
             os.close(fd)
         except Exception:

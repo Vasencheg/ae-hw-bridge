@@ -228,11 +228,13 @@ class DaemonServer:
                 if self.idle_timeout and self.idle_timeout > 0:
                     with self._lock:
                         num_clients = len(self._clients)
-                    if num_clients == 0:
+                    pty_connected = getattr(self.console, "is_pty_connected", lambda: False)()
+                    if num_clients == 0 and not pty_connected:
                         if self._last_client_disconnect_time is None:
                             self._last_client_disconnect_time = time.time()
                         elif time.time() - self._last_client_disconnect_time >= self.idle_timeout:
                             # Auto-shutdown: all clients disconnected and idle timeout expired
+                            _logger.info("Auto-shutdown: no active clients or PTY connections for %.1fs", self.idle_timeout)
                             self._running = False
                             break
                     else:

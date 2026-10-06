@@ -105,8 +105,13 @@ class ConsoleReader(IConsoleReader):
 
             slave_name = os.ttyname(slave_fd)
             self._pty_master_fd = master_fd
-            self._pty_slave_fd = slave_fd
             self._pty_slave_name = slave_name
+            # Close slave descriptor in daemon process so master reports POLLHUP when no client is attached
+            try:
+                os.close(slave_fd)
+            except OSError:
+                pass
+            self._pty_slave_fd = None
 
             # Determine symlinks to create
             symlinks_to_create = []
@@ -137,6 +142,19 @@ class ConsoleReader(IConsoleReader):
             self._pty_thread.start()
         except Exception as e:
             _logger.warning("Failed to initialize virtual PTY: %s", e)
+
+    def is_pty_connected(self) -> bool:
+        """Check if any external client (tio, minicom, picocom, or builtin) currently has the PTY open."""
+        if self._pty_master_fd is None:
+            return False
+        import select
+        p = select.poll()
+        p.register(self._pty_master_fd, select.POLLHUP)
+        events = p.poll(0)
+        for _, ev in events:
+            if ev & select.POLLHUP:
+                return False
+        return True
 
     def _cleanup_pty(self) -> None:
         """Clean up virtual PTY descriptors and symlinks."""
@@ -178,6 +196,11 @@ class ConsoleReader(IConsoleReader):
             if fd is None:
                 break
             try:
+                # If no client is connected to PTY, sleep briefly so we do not spin on POLLHUP
+                if not self.is_pty_connected():
+                    self._stop_event.wait(0.1)
+                    continue
+
                 r, _, _ = select.select([fd], [], [], 0.2)
                 if not r:
                     continue
@@ -187,8 +210,9 @@ class ConsoleReader(IConsoleReader):
                 data = os.read(fd, 1024)
                 if data:
                     self.write(data)
-            except (OSError, ValueError, TypeError):
-                time.sleep(0.05)
+            except Exception as e:
+                _logger.debug("PTY to serial forwarding: %s", e)
+                self._stop_event.wait(0.05)
 
     def _append_line(self, line: str) -> None:
         """Timestamp, append line to ring buffer, increment counter and notify waiters."""
@@ -376,8 +400,16 @@ class ConsoleReader(IConsoleReader):
         """Write raw bytes to the target console."""
         with self._serial_lock:
             if not self._serial or not self._serial.is_open:
-                self._serial = self._open_serial()
-            return self._serial.write(data)
+                try:
+                    self._serial = self._open_serial()
+                except Exception as e:
+                    _logger.warning("Cannot write to UART; port open failed: %s", e)
+                    return 0
+            try:
+                return self._serial.write(data)
+            except Exception as e:
+                _logger.warning("Failed writing to UART: %s", e)
+                return 0
 
     def clear(self) -> None:
         """Clear all lines currently buffered."""
