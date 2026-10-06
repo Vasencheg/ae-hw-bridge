@@ -30,7 +30,7 @@ ae-hw-bridge console [options]
 ```
 
 ### Options
-* `-t, --target <NAME>`: Target name (default: auto-detected or first configured target).
+* `-t, --target <NAME>`: Target name (matches the persistent badge of connected hardware, e.g. `jetson`). Default: auto-detected from connected hardware badge.
 * `-n, --lines <N>`: Output the last `N` lines from the daemon's ring buffer and exit immediately.
 * `-f, --follow`: Continuously stream live console output (like `tail -f`).
 * `--grep <PATTERN>`: Filter output lines by regular expression or substring.

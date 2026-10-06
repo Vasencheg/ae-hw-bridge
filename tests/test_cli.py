@@ -7,8 +7,9 @@ import tempfile
 import pytest
 from unittest.mock import MagicMock, patch
 
-from ae_hw_bridge.mcp.server import cmd_status, cmd_stop, cmd_console
+from ae_hw_bridge.mcp.server import cmd_status, cmd_stop, cmd_console, _get_or_start_daemon
 from ae_hw_bridge.core.interfaces import IReplClient, IConsoleReader
+from ae_hw_bridge.core.discovery import HWPuppetDevice
 from ae_hw_bridge.daemon.server import DaemonServer
 
 
@@ -163,3 +164,60 @@ def test_cmd_console_streaming_notice(capsys: pytest.CaptureFixture[str]) -> Non
 
     captured = capsys.readouterr()
     assert "Streaming live console output" in captured.err
+
+
+def test_daemon_resolution_by_connected_badge(capsys: pytest.CaptureFixture[str]) -> None:
+    puppet = HWPuppetDevice(
+        serial="serial123",
+        control_port="/dev/ttyACM0",
+        uart_port="/dev/ttyACM1",
+        sysfs_path="",
+        badge="jetson",
+    )
+    with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[puppet]), \
+         patch("pathlib.Path.glob", return_value=[]), \
+         patch("ae_hw_bridge.mcp.server.ensure_daemon_running") as mock_ensure:
+        mock_client = MagicMock()
+        mock_ensure.return_value = mock_client
+        res = _get_or_start_daemon("jetson")
+        assert res == mock_client
+        mock_ensure.assert_called_once_with(
+            name="jetson",
+            control_port="/dev/ttyACM0",
+            uart_port="/dev/ttyACM1",
+        )
+
+
+def test_daemon_resolution_auto_names_from_badge(capsys: pytest.CaptureFixture[str]) -> None:
+    puppet = HWPuppetDevice(
+        serial="serial123",
+        control_port="/dev/ttyACM0",
+        uart_port="/dev/ttyACM1",
+        sysfs_path="",
+        badge="jetson",
+    )
+    with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[puppet]), \
+         patch("pathlib.Path.glob", return_value=[]), \
+         patch("ae_hw_bridge.mcp.server.ensure_daemon_running") as mock_ensure:
+        mock_client = MagicMock()
+        mock_ensure.return_value = mock_client
+        res = _get_or_start_daemon(None)
+        assert res == mock_client
+        mock_ensure.assert_called_once_with(
+            name="jetson",
+            control_port="/dev/ttyACM0",
+            uart_port="/dev/ttyACM1",
+        )
+
+
+def test_daemon_resolution_multiple_puppets_error(capsys: pytest.CaptureFixture[str]) -> None:
+    p1 = HWPuppetDevice(serial="s1", control_port="/dev/ttyACM0", uart_port="/dev/ttyACM1", sysfs_path="", badge="jetson")
+    p2 = HWPuppetDevice(serial="s2", control_port="/dev/ttyACM2", uart_port="/dev/ttyACM3", sysfs_path="", badge="rockchip")
+    with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[p1, p2]), \
+         patch("pathlib.Path.glob", return_value=[]), \
+         pytest.raises(SystemExit) as exc_info:
+        _get_or_start_daemon(None)
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Multiple HW-Puppet devices connected ('jetson', 'rockchip')" in captured.err

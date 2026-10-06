@@ -240,37 +240,54 @@ def cmd_label_device(badge: str, port: Optional[str] = None) -> None:
 
 
 def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
-    """Connect to a running daemon or start one automatically if hardware is present."""
+    """Connect to a running daemon or start one automatically based on connected hardware."""
     cfg = load_bridge_config()
     eff_name = target
+    matched_puppet: Optional[HWPuppetDevice] = None
 
     if not eff_name:
         # Check if any daemon is already running
-        # 1. Configured targets
         if cfg.targets:
             for t_name in cfg.targets.keys():
                 candidate = DaemonIpcClient(socket_path=get_socket_path(t_name))
                 if candidate.ping():
                     return candidate
-        # 2. Base daemon
-        base_candidate = DaemonIpcClient(socket_path=get_socket_path("base"))
-        if base_candidate.ping():
-            return base_candidate
-        # 3. Any active lock file in /tmp
+
+        running_clients: list[tuple[str, DaemonIpcClient]] = []
         for p in sorted(Path("/tmp").glob("ae-hw-bridge-*.lock")):
             if p.name.endswith("-spawn.lock"):
                 continue
             m = re.match(r"^ae-hw-bridge-(.+)\.lock$", p.name)
             if m:
-                cand = DaemonIpcClient(socket_path=get_socket_path(m.group(1)))
+                cand_name = m.group(1)
+                cand = DaemonIpcClient(socket_path=get_socket_path(cand_name))
                 if cand.ping():
-                    return cand
+                    running_clients.append((cand_name, cand))
 
-        # No daemon running; choose default name to start
-        if cfg.targets:
-            eff_name = next(iter(cfg.targets.keys()))
+        if len(running_clients) == 1:
+            return running_clients[0][1]
+        elif len(running_clients) > 1:
+            for c_name, cand in running_clients:
+                if c_name == "base":
+                    return cand
+            return running_clients[0][1]
+
+        # No daemon running: discover connected hardware
+        puppets = scan_hw_puppets(probe_badges=True)
+        if not puppets:
+            print("Error: No HW-Puppet devices detected via USB.", file=sys.stderr)
+            sys.exit(1)
+        elif len(puppets) == 1:
+            matched_puppet = puppets[0]
+            eff_name = matched_puppet.badge or "base"
         else:
-            eff_name = "base"
+            badges_str = ", ".join(f"'{p.badge}'" if p.badge else f"<{p.control_port}>" for p in puppets)
+            print(
+                f"Error: Multiple HW-Puppet devices connected ({badges_str}). "
+                f"Please specify target with -t <name>.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     else:
         # User specified an explicit target name: check if daemon is running
         sock_path = get_socket_path(eff_name)
@@ -278,66 +295,50 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
         if client.ping():
             return client
 
-        # Validate target existence before attempting to spawn
-        valid_targets: set[str] = set()
-        if cfg.targets:
-            valid_targets.update(cfg.targets.keys())
-        discovered = TargetLoader.discover_target_files()
-        if discovered:
-            valid_targets.update(discovered.keys())
-        if not valid_targets:
-            valid_targets.add("base")
-            valid_targets.add("default")
-        else:
-            valid_targets.add("base")
+        # Daemon not answering; validate target against connected hardware badges
+        puppets = scan_hw_puppets(probe_badges=True)
 
-        try:
-            puppets = scan_hw_puppets(probe_badges=True)
+        # 1. Match by hardware badge or serial
+        for p in puppets:
+            if p.badge == eff_name or p.serial == eff_name:
+                matched_puppet = p
+                break
+
+        # 2. Match unbadged single device if requested 'base' or 'default'
+        if not matched_puppet and eff_name in ("base", "default"):
+            unbadged = [p for p in puppets if not p.badge]
+            if len(unbadged) == 1:
+                matched_puppet = unbadged[0]
+
+        # 3. Match from local config.yml if user configured an explicit target alias
+        if not matched_puppet and cfg.targets and eff_name in cfg.targets:
+            t_cfg = cfg.targets[eff_name]
+            p_badge = t_cfg.puppet
             for p in puppets:
-                if p.badge:
-                    valid_targets.add(p.badge)
-        except Exception:
-            pass
+                if p.badge == p_badge or p.serial == p_badge:
+                    matched_puppet = p
+                    break
 
-        if eff_name not in valid_targets:
-            print(f"Error: Target '{eff_name}' not found.", file=sys.stderr)
-            display_targets = sorted(t for t in valid_targets if t != "default")
-            if display_targets:
-                print(f"Available targets: {', '.join(display_targets)}", file=sys.stderr)
+        if not matched_puppet:
+            print(f"Error: Target '{eff_name}' not found on connected hardware.", file=sys.stderr)
+            if puppets:
+                print("Connected hardware:", file=sys.stderr)
+                for p in puppets:
+                    b = f"'{p.badge}'" if p.badge else "<not set>"
+                    print(f"  - Control: {p.control_port} | UART: {p.uart_port or 'none'} | Badge: {b}", file=sys.stderr)
+                if any(not p.badge for p in puppets):
+                    print("Tip: Assign a badge to the connected board using: ae-hw-bridge label <name>", file=sys.stderr)
+            else:
+                print("  (No HW-Puppet USB boards detected)", file=sys.stderr)
             sys.exit(1)
 
-    sock_path = get_socket_path(eff_name)
-    client = DaemonIpcClient(socket_path=sock_path)
-    if client.ping():
-        return client
-
-    # Daemon not answering; spawn in background
+    # Daemon not answering; spawn in background using matched_puppet
     print(f"AE-HW-BRIDGE daemon '{eff_name}' is not running. Starting...", file=sys.stderr)
     try:
-        ctrl_port = None
-        uart_port = None
-        puppet_id = cfg.puppet
-        if cfg.targets and eff_name in cfg.targets:
-            t_cfg = cfg.targets[eff_name]
-            ctrl_port = t_cfg.port or cfg.port
-            uart_port = t_cfg.uart_port or cfg.uart_port
-            puppet_id = t_cfg.puppet or cfg.puppet
-        elif eff_name not in ("base", "default"):
-            puppet_id = eff_name
-        elif cfg.port or cfg.uart_port:
-            ctrl_port = cfg.port
-            uart_port = cfg.uart_port
-
-        puppet = resolve_puppet(
-            puppet_name_or_badge=puppet_id,
-            control_port=ctrl_port,
-            uart_port=uart_port,
-            probe_badges=True,
-        )
         client = ensure_daemon_running(
             name=eff_name,
-            control_port=puppet.control_port,
-            uart_port=puppet.uart_port,
+            control_port=matched_puppet.control_port,
+            uart_port=matched_puppet.uart_port,
         )
         return client
     except Exception as e:
