@@ -241,7 +241,7 @@ $ ae-hw-bridge status --json
     "uart_port": "/dev/ttyACM1",
     "pty_path": "/tmp/ae-hw-bridge-uart",
     "pty_target": "/dev/pts/3",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "firmware_info": {
       "badge": "jetson",
       "version": "0.2.0"
