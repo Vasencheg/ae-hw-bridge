@@ -146,11 +146,18 @@ ae-hw-bridge list
 ae-hw-bridge label jetson-bench
 ae-hw-bridge label stm32-bench --port /dev/ttyACM1
 
+# Explore and execute target actions directly from Bash
+ae-hw-bridge actions [-t <target>]
+ae-hw-bridge call reset [-t <target>]
+ae-hw-bridge send "uname -a" [-t <target>]
+ae-hw-bridge exec "print('MicroPython alive')" [-t <target>]
+
 # Run the FastMCP server
 ae-hw-bridge
 ```
 
 > [!TIP]
+> * For a quick reference of all commands, see the [**Cheat Sheet**](docs/cheat_sheet.md).
 > * For full command-line usage and daemon management, see the [CLI Reference Guide](docs/cli.md).
 > * For in-depth architectural details, virtual PTY sharing, and external terminal setup (`tio`, `minicom`), see the [Virtual UART Console Guide](docs/virtual_console.md).
 

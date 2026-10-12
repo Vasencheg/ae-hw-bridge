@@ -2,6 +2,9 @@
 
 `ae-hw-bridge` provides a comprehensive command line utility for managing hardware test benches, monitoring background daemons, and inspecting target UART consoles.
 
+> [!TIP]
+> Looking for a quick one-page cheat sheet? See the [**Cheat Sheet**](cheat_sheet.md).
+
 ---
 
 ## 1. Subcommands Overview
@@ -9,6 +12,10 @@
 | Command | Description |
 |:---|:---|
 | `ae-hw-bridge console` | Connect to target UART console (interactive terminal or log stream). |
+| `ae-hw-bridge actions` | List available target actions, documentation, and parameters. |
+| `ae-hw-bridge call` | Dynamically invoke a target action (e.g. `reset`, `power_cycle`). |
+| `ae-hw-bridge exec` | Execute MicroPython code directly on ESP32-S3 via CDC0 Raw REPL. |
+| `ae-hw-bridge send` | Send shell command to target UART console (CDC1) and display response. |
 | `ae-hw-bridge status` | Display status of running daemons, connected clients, ports, and virtual PTY. |
 | `ae-hw-bridge stop` | Gracefully stop background daemons and release physical serial ports. |
 | `ae-hw-bridge list` | List connected HW-Puppet boards, badges, and configured targets. |
@@ -74,7 +81,113 @@ ae-hw-bridge console -n 100 | grep "ERROR"
 
 ---
 
-## 3. `ae-hw-bridge status`
+## 3. `ae-hw-bridge actions`
+
+Lists all callable hardware actions, parameters, documentation, and `@repl` indicators supported by the connected target.
+
+### Usage
+```bash
+ae-hw-bridge actions [options]
+```
+
+### Options
+* `-t, --target <NAME>`: Target name (default: auto-detected from running daemon or connected hardware badge).
+* `--json`: Output actions and parameter signatures in structured JSON.
+
+### Example Output
+```bash
+$ ae-hw-bridge actions
+Available actions for 'jetson':
+============================================================
+  clear                                Clear target UART console ring buffer (alias for clear_target_console).
+  enter_recovery                       Put Jetson into Force Recovery (APX/RCM) mode for flashing.
+  exec (code, timeout=10.0)            Execute MicroPython code on ESP32-S3 (alias for run_custom_code).
+  hardware_reset (duration=0.5)        Pulse the hardware reset line without waiting for OS boot.
+  power_cycle (duration=0.5)           Pulse power button on Jetson (short press to wake/sleep, >=5s for force poweroff).
+  recovery_mode                        Put Jetson Tegra processor into Force Recovery (APX/RCM) mode.
+  reset (duration=0.5)                 Hardware reset Jetson via pulse on RESET pin.
+  send (command, wait_timeout=5.0)     Send shell command to target UART console (alias for send_target_command).
+  set_status_led (r, g, b, pin=48)     Set onboard WS2812 RGB LED color (R, G, B: 0..255). [MicroPython @repl]
+Run via CLI:     ae-hw-bridge call <action> [args...]
+```
+
+---
+
+## 4. `ae-hw-bridge call`
+
+Dynamically invokes any target action exposed by the hardware bridge. Supports positional arguments and `key=val` keyword parameters.
+
+### Usage
+```bash
+ae-hw-bridge call <ACTION> [ARGS...] [-t <TARGET>] [--json]
+```
+
+### Options
+* `-t, --target <NAME>`: Target name (default: auto).
+* `--json`: Output result in structured JSON format (default: clean human-friendly status line with target and source origin attribution).
+
+### Examples
+```bash
+# Trigger hardware reset with default duration (0.5s):
+ae-hw-bridge call reset
+# Output: Target 'jetson' [builtin]: reset -> OK
+
+# Trigger hardware reset with custom duration:
+ae-hw-bridge call reset duration=1.0
+
+# Put board into Force Recovery / APX mode:
+ae-hw-bridge call recovery_mode
+
+# Pulse power button to wake up board:
+ae-hw-bridge call power_cycle
+
+# Output in JSON format (for CI/scripts):
+ae-hw-bridge call reset --json
+```
+
+---
+
+## 5. `ae-hw-bridge exec`
+
+Convenience shortcut to execute arbitrary MicroPython code directly in ESP32-S3 RAM via the CDC0 Raw REPL.
+
+### Usage
+```bash
+ae-hw-bridge exec "<MICROPYTHON_CODE>" [--timeout <SECONDS>] [-t <TARGET>]
+```
+
+### Examples
+```bash
+# Check ESP32 CPU frequency:
+ae-hw-bridge exec "import machine; print('CPU freq:', machine.freq())"
+
+# Read ESP32 internal temperature sensor:
+ae-hw-bridge exec "import esp32; print('Core temp:', esp32.raw_temperature())"
+```
+
+---
+
+## 6. `ae-hw-bridge send`
+
+Convenience shortcut to send an interactive shell command string to the target console (CDC1) and display only new response lines.
+
+### Usage
+```bash
+ae-hw-bridge send "<SHELL_COMMAND>" [--timeout <SECONDS>] [-t <TARGET>]
+```
+
+### Examples
+```bash
+# Check target system information:
+ae-hw-bridge send "uname -a"
+
+# Check IP addresses:
+ae-hw-bridge send "ip addr show"
+```
+
+---
+
+## 7. `ae-hw-bridge status`
 
 Inspects the state of running `ae-hw-bridge` background daemons, connected MCP clients (AI agents), physical serial ports, and virtual PTY paths.
 
@@ -139,7 +252,7 @@ $ ae-hw-bridge status --json
 
 ---
 
-## 4. `ae-hw-bridge stop`
+## 8. `ae-hw-bridge stop`
 
 Gracefully terminates background daemons, cleans up Unix domain sockets, lock files, and virtual PTY symlinks, and releases physical USB serial ports.
 
@@ -168,7 +281,7 @@ $ ae-hw-bridge stop --all
 
 ---
 
-## 5. `ae-hw-bridge list`
+## 9. `ae-hw-bridge list`
 
 Scans the Linux sysfs subsystem for connected HW-Puppet boards (USB VID `0x303a`, PID `0x4002`), probes their NVS badges over CDC0, and displays configured targets from `.ae-hw-bridge/config.yml`.
 
@@ -185,7 +298,7 @@ Found 1 connected HW-Puppet device(s):
 
 ---
 
-## 6. `ae-hw-bridge label`
+## 10. `ae-hw-bridge label`
 
 Writes or clears a persistent hardware badge string in ESP32-S3 Non-Volatile Storage (NVS). This allows automatic, fail-safe port binding and target matching in multi-target test benches.
 
@@ -217,7 +330,7 @@ Connecting to /dev/ttyACM0 to clear persistent badge...
 
 ---
 
-## 7. `ae-hw-bridge` (FastMCP Server Mode)
+## 11. `ae-hw-bridge` (FastMCP Server Mode)
 
 Running `ae-hw-bridge` without subcommands launches the **Model Context Protocol (MCP)** server. This is the entrypoint configured in AI assistants (Claude Desktop, Cursor, Agents Engine).
 
