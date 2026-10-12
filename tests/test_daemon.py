@@ -380,6 +380,12 @@ def test_daemon_status_and_pty_reporting() -> None:
         assert status.get("pty_path") == pty_link
         assert client.effective_pty_path == pty_link
         assert status.get("firmware_info", {}).get("badge") == "testbadge"
+        assert "target_source" in status
+        assert "target_class" in status
+
+        # Test dynamic load_target via IPC
+        load_res = client.load_target(target_path=None, name="testtarget")
+        assert load_res.get("status") == "ok"
     finally:
         server.stop()
         if os.path.exists(temp_dir):

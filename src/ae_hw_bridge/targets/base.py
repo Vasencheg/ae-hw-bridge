@@ -82,6 +82,8 @@ class BaseTarget:
     ) -> None:
         self.repl = repl
         self.console = console
+        self.target_source: str = "core"
+        self.target_file: Optional[str] = None
 
     def run_custom_code(self, code: str, timeout: float = 10.0) -> dict[str, Any]:
         """Execute arbitrary MicroPython code directly in ESP32 RAM via CDC0 Raw REPL.
@@ -92,6 +94,18 @@ class BaseTarget:
         """
         res = self.repl.exec_code(code, timeout=timeout)
         return {"ok": res.ok, "stdout": res.stdout, "stderr": res.stderr, "result": res.result}
+
+    def exec(self, code: str, timeout: float = 10.0) -> dict[str, Any]:
+        """Execute MicroPython code on ESP32-S3 (alias for run_custom_code)."""
+        return self.run_custom_code(code=code, timeout=timeout)
+
+    def send(self, command: str, wait_timeout: float = 5.0) -> str:
+        """Send shell command to target UART console (alias for send_target_command)."""
+        return self.send_target_command(command=command, wait_timeout=wait_timeout)
+
+    def clear(self) -> dict[str, str]:
+        """Clear target UART console ring buffer (alias for clear_target_console)."""
+        return self.clear_target_console()
 
     def clear_target_console(self) -> dict[str, str]:
         """Clear the target UART console circular buffer.
@@ -219,3 +233,79 @@ class BaseTarget:
             "firmware": firmware_info,
             "ports": ports_info,
         }
+
+    def get_actions(self) -> list[dict[str, Any]]:
+        """Return list of callable action descriptions on this target."""
+        actions = []
+        for name, member in inspect.getmembers(self, predicate=callable):
+            if name.startswith("_"):
+                continue
+            doc = inspect.getdoc(member) or ""
+            doc_first_line = doc.splitlines()[0] if doc else ""
+
+            params = []
+            try:
+                sig = inspect.signature(member)
+                for p_name, param in sig.parameters.items():
+                    if p_name == "self":
+                        continue
+                    p_info = {
+                        "name": p_name,
+                        "default": None if param.default is inspect.Parameter.empty else repr(param.default),
+                        "has_default": param.default is not inspect.Parameter.empty,
+                    }
+                    params.append(p_info)
+            except Exception:
+                pass
+
+            qualname = getattr(member, "__qualname__", "")
+            owner_class = qualname.split(".")[0] if "." in qualname else self.__class__.__name__
+            is_core = (owner_class == "BaseTarget")
+            source_label = "core" if is_core else getattr(self, "target_source", "custom")
+
+            actions.append({
+                "name": name,
+                "summary": doc_first_line,
+                "doc": doc,
+                "parameters": params,
+                "is_repl": getattr(member, "_is_repl_method", False),
+                "is_core": is_core,
+                "defined_in": owner_class,
+                "source": source_label,
+                "target_file": getattr(self, "target_file", None),
+            })
+        return sorted(actions, key=lambda a: a["name"])
+
+    ALIASES: dict[str, list[str]] = {
+        "reset": ["hardware_reset", "trigger_reset"],
+        "power_cycle": ["power_button", "trigger_power_button"],
+        "recovery_mode": ["enter_recovery", "trigger_recovery"],
+        "exec": ["run_custom_code"],
+        "send": ["send_target_command"],
+        "clear": ["clear_target_console"],
+    }
+
+    def call_action(self, action_name: str, *args: Any, **kwargs: Any) -> Any:
+        """Dynamically invoke a target action by name."""
+        func = getattr(self, action_name, None)
+        if not callable(func) or action_name.startswith("_"):
+            # Fallback to common hardware action aliases
+            if action_name in self.ALIASES:
+                for alt in self.ALIASES[action_name]:
+                    candidate = getattr(self, alt, None)
+                    if callable(candidate):
+                        func = candidate
+                        break
+
+        if not callable(func) or action_name.startswith("_"):
+            available = [a["name"] for a in self.get_actions()]
+            raise ValueError(f"Unknown action '{action_name}'. Available actions: {available}")
+        res = func(*args, **kwargs)
+        if isinstance(res, ExecutionResult):
+            return {
+                "ok": res.ok,
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+                "result": res.result,
+            }
+        return res

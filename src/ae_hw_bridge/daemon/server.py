@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Optional, Dict, Callable
 
 from ae_hw_bridge import __version__
+from ae_hw_bridge.targets.loader import TargetLoader
 from ae_hw_bridge.core.interfaces import (
     IReplClient,
     IConsoleReader,
@@ -58,6 +59,7 @@ class DaemonServer:
         idle_timeout: Optional[float] = 30.0,
         firmware_info: Optional[dict[str, Any]] = None,
         name: str = "base",
+        target_path: Optional[str] = None,
     ) -> None:
         self.repl = repl
         self.console = console
@@ -66,6 +68,7 @@ class DaemonServer:
         self.pty_path = pty_path
         self.idle_timeout = idle_timeout
         self.name = name
+        self.target_path = target_path
         self._firmware_info = firmware_info
         self._lock_fd: Optional[int] = None
         self._server_sock: Optional[socket.socket] = None
@@ -97,8 +100,19 @@ class DaemonServer:
             "repl_connect": self._handle_repl_connect,
             "repl_close": self._handle_repl_close,
             "get_firmware_info": self._handle_get_firmware_info,
+            "list_actions": self._handle_list_actions,
+            "call_action": self._handle_call_action,
+            "load_target": self._handle_load_target,
             "shutdown": self._handle_shutdown,
         }
+
+        # Instantiate target controller
+        self.target = TargetLoader.load_named_target(
+            name=self.name,
+            repl=self.repl,
+            console=self.console,
+            target_path=self.target_path,
+        )
 
     def is_running(self) -> bool:
         """Return True if daemon server is actively running."""
@@ -351,6 +365,10 @@ class DaemonServer:
             "uart_port": getattr(self.console, "port", None),
             "pty_path": effective_pty,
             "firmware_info": self._firmware_info,
+            "target_source": getattr(self.target, "target_source", "unknown"),
+            "target_file": getattr(self.target, "target_file", None),
+            "target_class": self.target.__class__.__name__,
+            "target_mtime": getattr(self.target, "target_mtime", 0.0),
         }
 
     def _handle_shutdown(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -467,6 +485,34 @@ class DaemonServer:
                 return {"error": str(e)}
         return self._firmware_info
 
+    def _handle_list_actions(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        return self.target.get_actions()
+
+    def _handle_call_action(self, params: dict[str, Any]) -> Any:
+        action = params["action"]
+        args = params.get("args", [])
+        kwargs = params.get("kwargs", {})
+        return self.target.call_action(action, *args, **kwargs)
+
+    def _handle_load_target(self, params: dict[str, Any]) -> dict[str, Any]:
+        target_path = params.get("target_path")
+        name = params.get("name") or self.name
+        new_target = TargetLoader.load_named_target(
+            name=name,
+            repl=self.repl,
+            console=self.console,
+            target_path=target_path,
+        )
+        self.target = new_target
+        return {
+            "status": "ok",
+            "name": self.name,
+            "target_source": getattr(self.target, "target_source", "unknown"),
+            "target_file": getattr(self.target, "target_file", None),
+            "target_class": self.target.__class__.__name__,
+            "target_mtime": getattr(self.target, "target_mtime", 0.0),
+        }
+
 
 def stop_daemon(
     lock_path: str = DEFAULT_LOCK_PATH,
@@ -539,6 +585,7 @@ def run_daemon(
     pty_path: Optional[str] = None,
     idle_timeout: Optional[float] = 30.0,
     name: str = "base",
+    target_path: Optional[str] = None,
 ) -> None:
     """Run daemon process until SIGINT/SIGTERM or idle timeout."""
     eff_ctrl = control_port or get_default_control_port()
@@ -562,6 +609,7 @@ def run_daemon(
         idle_timeout=idle_timeout,
         firmware_info=fw_info,
         name=name,
+        target_path=target_path,
     )
 
     stop_event = threading.Event()
@@ -608,6 +656,7 @@ def main() -> None:
         default=30.0,
         help="Seconds of no connected clients before auto-shutdown (0 to disable, default: 30.0)",
     )
+    parser.add_argument("--target-path", default=None, help="Path to custom target file or directory")
     parser.add_argument("--stop", action="store_true", help="Stop running daemon and release hardware ports")
 
     args = parser.parse_args()
@@ -637,6 +686,7 @@ def main() -> None:
         pty_path=args.pty_path,
         idle_timeout=idle_timeout,
         name=args.name,
+        target_path=args.target_path,
     )
 
 

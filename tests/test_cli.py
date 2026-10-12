@@ -176,6 +176,7 @@ def test_daemon_resolution_by_connected_badge(capsys: pytest.CaptureFixture[str]
     )
     with patch("ae_hw_bridge.mcp.server.scan_hw_puppets", return_value=[puppet]), \
          patch("pathlib.Path.glob", return_value=[]), \
+         patch("ae_hw_bridge.daemon.client.DaemonIpcClient.ping", return_value=False), \
          patch("ae_hw_bridge.mcp.server.ensure_daemon_running") as mock_ensure:
         mock_client = MagicMock()
         mock_ensure.return_value = mock_client
@@ -256,3 +257,78 @@ def test_cmd_label_clear(capsys: pytest.CaptureFixture[str]) -> None:
 
     captured = capsys.readouterr()
     assert "Persistent badge successfully cleared" in captured.out
+
+
+def test_cmd_actions_and_call(capsys: pytest.CaptureFixture[str]) -> None:
+    from ae_hw_bridge.mcp.server import cmd_actions, cmd_call
+    mock_client = MagicMock()
+    mock_client.list_actions.return_value = [
+        {"name": "reset", "summary": "Reset target", "parameters": [{"name": "duration", "default": "0.5", "has_default": True}], "is_repl": False},
+        {"name": "exec", "summary": "Exec code", "parameters": [{"name": "code", "default": None, "has_default": False}], "is_repl": False},
+    ]
+    mock_client.call_action.return_value = {"status": "ok", "reset": True}
+
+    with patch("ae_hw_bridge.mcp.server._get_or_start_daemon", return_value=mock_client):
+        # 1. Test cmd_actions table output
+        cmd_actions(["-t", "jetson"])
+        captured = capsys.readouterr()
+        assert "Target: 'jetson'" in captured.out
+        assert "reset" in captured.out
+        assert "exec" in captured.out
+
+        # 2. Test cmd_actions JSON output
+        cmd_actions(["-t", "jetson", "--json"])
+        captured_json = capsys.readouterr()
+        assert '"name": "reset"' in captured_json.out
+
+        # 3. Test cmd_call human-friendly output
+        cmd_call(["-t", "jetson", "reset", "duration=1.0"])
+        mock_client.call_action.assert_called_with("reset", duration=1.0)
+        captured_call = capsys.readouterr()
+        assert "Target 'jetson'" in captured_call.out
+        assert "reset" in captured_call.out
+        assert "OK" in captured_call.out
+
+        # 4. Test cmd_call with --json
+        cmd_call(["-t", "jetson", "--json", "reset"])
+        captured_json_call = capsys.readouterr()
+        assert '"status": "ok"' in captured_json_call.out
+
+
+def test_cmd_exec_and_send(capsys: pytest.CaptureFixture[str]) -> None:
+    from ae_hw_bridge.mcp.server import cmd_exec, cmd_send
+    mock_client = MagicMock()
+    mock_client.target_exec.return_value = {"ok": True, "stdout": "micro_out\n", "stderr": ""}
+    mock_client.target_send.return_value = "Linux orin 5.15"
+
+    with patch("ae_hw_bridge.mcp.server._get_or_start_daemon", return_value=mock_client):
+        # 1. Test cmd_exec
+        cmd_exec(["print('hi')"])
+        mock_client.target_exec.assert_called_with("print('hi')", timeout=10.0)
+        captured_exec = capsys.readouterr()
+        assert "micro_out\n" in captured_exec.out
+
+        # 2. Test cmd_send
+        cmd_send(["uname -a"])
+        mock_client.target_send.assert_called_with("uname -a", wait_timeout=5.0)
+        captured_send = capsys.readouterr()
+        assert "Linux orin 5.15" in captured_send.out
+
+
+def test_sync_daemon_target() -> None:
+    from pathlib import Path
+    from ae_hw_bridge.mcp.server import _sync_daemon_target
+    mock_client = MagicMock()
+    mock_client.get_status.return_value = {
+        "target_file": "/other/path/target.py",
+        "target_source": "builtin",
+        "target_mtime": 0.0,
+    }
+
+    dummy_path = Path("/tmp/dummy_project/target.py")
+    with patch("ae_hw_bridge.targets.loader.TargetLoader.discover_target_files", return_value={"jetson": dummy_path}):
+        _sync_daemon_target(mock_client, "jetson")
+        mock_client.load_target.assert_called_once_with(
+            target_path=str(dummy_path.resolve()),
+            name="jetson",
+        )

@@ -205,3 +205,48 @@ class CustomBoardTarget(BaseTarget):
         assert hasattr(loaded_target, "board_ping")
         assert loaded_target.board_ping() == "pong"
 
+
+def test_base_target_get_actions_and_call_action() -> None:
+    mock_repl = MagicMock(spec=IReplClient)
+    mock_console = MagicMock(spec=IConsoleReader)
+
+    target = BaseTarget(repl=mock_repl, console=mock_console)
+    actions = target.get_actions()
+
+    action_names = [a["name"] for a in actions]
+    assert "exec" in action_names
+    assert "send" in action_names
+    assert "clear" in action_names
+    assert "run_custom_code" in action_names
+    assert "read_target_console" in action_names
+
+    # Test dynamic call_action
+    mock_console.clear.return_value = None
+    res = target.call_action("clear")
+    assert res == {"status": "cleared"}
+
+    # Test alias resolution on custom target
+    class DummyTarget(BaseTarget):
+        def hardware_reset(self):
+            return {"status": "hardware_reset_done"}
+    dummy = DummyTarget(repl=mock_repl, console=mock_console)
+    assert dummy.call_action("reset") == {"status": "hardware_reset_done"}
+
+    # Test unknown action error
+    with pytest.raises(ValueError, match="Unknown action 'non_existent'"):
+        target.call_action("non_existent")
+
+
+def test_builtin_jetson_target_loading() -> None:
+    mock_repl = MagicMock(spec=IReplClient)
+    mock_console = MagicMock(spec=IConsoleReader)
+
+    jetson = TargetLoader.load_named_target("jetson", repl=mock_repl, console=mock_console)
+    assert jetson.__class__.__name__ == "JetsonTarget"
+    actions = [a["name"] for a in jetson.get_actions()]
+    assert "reset" in actions
+    assert "power_cycle" in actions
+    assert "recovery_mode" in actions
+    assert "hardware_reset" in actions
+    assert "set_status_led" in actions
+

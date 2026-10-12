@@ -291,6 +291,27 @@ class DaemonIpcClient(IReplClient, IConsoleReader):
         )
         return dict(res) if isinstance(res, dict) else {"matched": False, "line": None, "pattern": pattern}
 
+    def list_actions(self) -> list[dict[str, Any]]:
+        """List all available actions on the target from daemon."""
+        res = self.call("list_actions")
+        return list(res) if isinstance(res, list) else []
+
+    def call_action(self, action: str, *args: Any, **kwargs: Any) -> Any:
+        """Call target action via daemon IPC."""
+        return self.call("call_action", {"action": action, "args": list(args), "kwargs": kwargs})
+
+    def target_exec(self, code: str, timeout: float = 10.0) -> dict[str, Any]:
+        """Execute MicroPython code on ESP32-S3 via target action."""
+        return self.call_action("exec", code=code, timeout=timeout)
+
+    def target_send(self, command: str, wait_timeout: float = 5.0) -> str:
+        """Send shell command to target UART console via target action."""
+        return str(self.call_action("send", command=command, wait_timeout=wait_timeout))
+
+    def load_target(self, target_path: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:
+        """Request daemon to dynamically load or switch its active target controller."""
+        return self.call("load_target", {"target_path": target_path, "name": name})
+
 
 def ensure_daemon_running(
     control_port: Optional[str] = None,
@@ -299,6 +320,7 @@ def ensure_daemon_running(
     socket_path: Optional[str] = None,
     spawn_lock_path: Optional[str] = None,
     pty_path: Optional[str] = None,
+    target_path: Optional[str] = None,
     idle_timeout: float = 30.0,
 ) -> DaemonIpcClient:
     """Check if daemon is running; if not or if outdated, spawn it in background and wait until responsive."""
@@ -364,10 +386,12 @@ def ensure_daemon_running(
             "--idle-timeout",
             str(idle_timeout),
         ]
+        if target_path:
+            daemon_cmd.extend(["--target-path", target_path])
 
         log_path = f"/tmp/ae-hw-bridge-{eff_name}-daemon.log"
         log_file = open(log_path, "a", encoding="utf-8")
-        _logger.info("Spawning background hardware daemon: %s", " ".join(daemon_cmd))
+        _logger.debug("Spawning background hardware daemon: %s", " ".join(daemon_cmd))
 
         subprocess.Popen(
             daemon_cmd,
@@ -383,7 +407,7 @@ def ensure_daemon_running(
         while time.time() < deadline:
             time.sleep(0.1)
             if client.ping():
-                _logger.info("Daemon spawned and ready at %s", eff_socket_path)
+                _logger.debug("Daemon spawned and ready at %s", eff_socket_path)
                 return client
 
         _logger.error("Daemon failed to respond within 5.0s")

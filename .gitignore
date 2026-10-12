@@ -31,3 +31,15 @@ dist/
 .DS_Store
 *.swp
 *~
+
+# Agents Engine: dedicated board worktree
+.agents-engine
+
+# Agents Engine: skills published into each harness's directory
+.agents/skills/ae-*/
+.claude/skills/ae-*/
+.opencode/skills/ae-*/
+
+# Agents Engine: local provider hook settings
+.claude/settings.local.json
+.agents/hooks.json

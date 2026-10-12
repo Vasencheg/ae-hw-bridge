@@ -4,6 +4,7 @@ import os
 import sys
 import re
 import json
+import ast
 import time
 import shutil
 import argparse
@@ -147,8 +148,9 @@ def create_server(
                 uart_port=u_port,
                 probe_badges=True,
             )
+            eff_daemon_name = puppet.badge or "base"
             client = ensure_daemon_running(
-                name="base",
+                name=eff_daemon_name,
                 control_port=puppet.control_port,
                 uart_port=puppet.uart_port,
             )
@@ -243,6 +245,34 @@ def cmd_label_device(badge: str, port: Optional[str] = None) -> None:
         ser.close()
 
 
+def _sync_daemon_target(client: DaemonIpcClient, target_name: str) -> None:
+    """Ensure running daemon uses the target definition from the current project if available."""
+    try:
+        from ae_hw_bridge.targets.loader import TargetLoader
+        discovered = TargetLoader.discover_target_files()
+        project_target_path = str(discovered[target_name].resolve()) if target_name in discovered else None
+
+        status = client.get_status()
+        current_target_file = status.get("target_file")
+        current_mtime = status.get("target_mtime", 0.0)
+        current_source = status.get("target_source")
+
+        should_reload = False
+        if project_target_path:
+            if current_target_file != project_target_path:
+                should_reload = True
+            elif Path(project_target_path).exists() and Path(project_target_path).stat().st_mtime > current_mtime:
+                should_reload = True
+        elif current_target_file and current_source == "project":
+            # Running daemon had a project target loaded from another directory; fallback to default
+            should_reload = True
+
+        if should_reload:
+            client.load_target(target_path=project_target_path, name=target_name)
+    except Exception as e:
+        _logger.debug("Failed to sync daemon target: %s", e)
+
+
 def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
     """Connect to a running daemon or start one automatically based on connected hardware."""
     cfg = load_bridge_config()
@@ -255,7 +285,15 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
             for t_name in cfg.targets.keys():
                 candidate = DaemonIpcClient(socket_path=get_socket_path(t_name))
                 if candidate.ping():
-                    return candidate
+                    if candidate.is_compatible():
+                        _sync_daemon_target(candidate, t_name)
+                        return candidate
+                    candidate.shutdown()
+                    stop_daemon(
+                        lock_path=get_lock_path(t_name),
+                        socket_path=get_socket_path(t_name),
+                        pty_path=get_pty_path(t_name),
+                    )
 
         running_clients: list[tuple[str, DaemonIpcClient]] = []
         for p in sorted(Path("/tmp").glob("ae-hw-bridge-*.lock")):
@@ -266,14 +304,25 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
                 cand_name = m.group(1)
                 cand = DaemonIpcClient(socket_path=get_socket_path(cand_name))
                 if cand.ping():
-                    running_clients.append((cand_name, cand))
+                    if cand.is_compatible():
+                        running_clients.append((cand_name, cand))
+                    else:
+                        cand.shutdown()
+                        stop_daemon(
+                            lock_path=get_lock_path(cand_name),
+                            socket_path=get_socket_path(cand_name),
+                            pty_path=get_pty_path(cand_name),
+                        )
 
         if len(running_clients) == 1:
+            _sync_daemon_target(running_clients[0][1], running_clients[0][0])
             return running_clients[0][1]
         elif len(running_clients) > 1:
             for c_name, cand in running_clients:
                 if c_name == "base":
+                    _sync_daemon_target(cand, c_name)
                     return cand
+            _sync_daemon_target(running_clients[0][1], running_clients[0][0])
             return running_clients[0][1]
 
         # No daemon running: discover connected hardware
@@ -297,7 +346,15 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
         sock_path = get_socket_path(eff_name)
         client = DaemonIpcClient(socket_path=sock_path)
         if client.ping():
-            return client
+            if client.is_compatible():
+                _sync_daemon_target(client, eff_name)
+                return client
+            client.shutdown()
+            stop_daemon(
+                lock_path=get_lock_path(eff_name),
+                socket_path=get_socket_path(eff_name),
+                pty_path=get_pty_path(eff_name),
+            )
 
         # Daemon not answering; validate target against connected hardware badges
         puppets = scan_hw_puppets(probe_badges=True)
@@ -345,13 +402,22 @@ def _get_or_start_daemon(target: Optional[str] = None) -> DaemonIpcClient:
             sys.exit(1)
 
     # Daemon not answering; spawn in background using matched_puppet
-    print(f"AE-HW-BRIDGE daemon '{eff_name}' is not running. Starting...", file=sys.stderr)
+    _logger.debug("AE-HW-BRIDGE daemon '%s' is not running. Starting...", eff_name)
     try:
-        client = ensure_daemon_running(
-            name=eff_name,
-            control_port=matched_puppet.control_port,
-            uart_port=matched_puppet.uart_port,
-        )
+        from ae_hw_bridge.targets.loader import TargetLoader
+        discovered = TargetLoader.discover_target_files()
+        init_target_path = str(discovered[eff_name].resolve()) if eff_name in discovered else None
+
+        spawn_kwargs: dict[str, Any] = {
+            "name": eff_name,
+            "control_port": matched_puppet.control_port,
+            "uart_port": matched_puppet.uart_port,
+        }
+        if init_target_path:
+            spawn_kwargs["target_path"] = init_target_path
+
+        client = ensure_daemon_running(**spawn_kwargs)
+        _sync_daemon_target(client, eff_name)
         return client
     except Exception as e:
         print(f"Error starting hardware daemon for '{eff_name}': {e}", file=sys.stderr)
@@ -679,16 +745,234 @@ def cmd_stop(args_list: list[str]) -> None:
         print("No active AE-HW-BRIDGE daemon found.")
 
 
+def cmd_actions(args_list: list[str]) -> None:
+    """List available target actions exposed by hardware bridge daemon."""
+    sub_parser = argparse.ArgumentParser(
+        prog="ae-hw-bridge actions",
+        description="List available target actions exposed by hardware bridge daemon",
+    )
+    sub_parser.add_argument("-t", "--target", default=None, help="Target name (default: auto)")
+    sub_parser.add_argument("--json", action="store_true", help="Output actions in JSON format")
+    args = sub_parser.parse_args(args_list)
+
+    client = _get_or_start_daemon(args.target)
+    actions = client.list_actions()
+
+    if args.json:
+        print(json.dumps(actions, indent=2))
+        return
+
+    target_name = args.target or getattr(client, "name", "target")
+    # Identify target class and source
+    source_type = None
+    target_class = None
+    for a in actions:
+        if not a.get("is_core") and a.get("source"):
+            source_type = a["source"]
+            target_class = a.get("defined_in")
+            break
+
+    source_desc = f"source: {source_type}" if source_type else "source: core BaseTarget"
+    if target_class:
+        source_desc += f", class: {target_class}"
+
+    print(f"\nTarget: '{target_name}' ({source_desc})")
+    print("=" * 68)
+    for a in actions:
+        params_str = ""
+        if a.get("parameters"):
+            p_parts = []
+            for p in a["parameters"]:
+                if p.get("has_default"):
+                    p_parts.append(f"{p['name']}={p['default']}")
+                else:
+                    p_parts.append(p["name"])
+            params_str = f" ({', '.join(p_parts)})"
+        name_str = f"{a['name']}{params_str}"
+        summary = a.get("summary") or ""
+        tags = []
+        if a.get("source") and a.get("source") != "core":
+            tags.append(a["source"])
+        elif a.get("is_core"):
+            tags.append("core")
+        if a.get("is_repl"):
+            tags.append("@repl")
+        tag_str = f" [{', '.join(tags)}]" if tags else ""
+        print(f"  {name_str:<36} {summary}{tag_str}")
+    print("Run via CLI:     ae-hw-bridge call <action> [args...]\n")
+
+
+def cmd_call(args_list: list[str]) -> None:
+    """Invoke a target action dynamically via the hardware bridge daemon."""
+    sub_parser = argparse.ArgumentParser(
+        prog="ae-hw-bridge call",
+        description="Invoke a target action (e.g. reset, power_cycle, recovery_mode, exec, send)",
+    )
+    sub_parser.add_argument("-t", "--target", default=None, help="Target name (default: auto)")
+    sub_parser.add_argument("--json", action="store_true", help="Output result in structured JSON format")
+    sub_parser.add_argument("action", help="Name of the action to invoke")
+    sub_parser.add_argument("action_args", nargs="*", help="Positional arguments and key=value kwargs")
+    args = sub_parser.parse_args(args_list)
+
+    client = _get_or_start_daemon(args.target)
+    target_name = args.target or getattr(client, "name", None) or client.get_status().get("name") or "target"
+
+    pos_args: list[Any] = []
+    kw_args: dict[str, Any] = {}
+    for tok in args.action_args:
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            try:
+                kw_args[k] = ast.literal_eval(v)
+            except Exception:
+                kw_args[k] = v
+        else:
+            try:
+                pos_args.append(ast.literal_eval(tok))
+            except Exception:
+                pos_args.append(tok)
+
+    # Query actions for origin attribution and alias resolution
+    actions = client.list_actions()
+    matched_action = None
+    for a in actions:
+        if a.get("name") == args.action:
+            matched_action = a
+            break
+
+    if not matched_action:
+        aliases = getattr(BaseTarget, "ALIASES", {})
+        if args.action in aliases:
+            for alt in aliases[args.action]:
+                for a in actions:
+                    if a.get("name") == alt:
+                        matched_action = a
+                        break
+                if matched_action:
+                    break
+
+    origin_tags = []
+    if matched_action:
+        src = matched_action.get("source") or "custom"
+        t_file = matched_action.get("target_file")
+        if src == "project" and t_file:
+            origin_tags.append(f"project: {Path(t_file).name}")
+        elif src:
+            origin_tags.append(src)
+        if matched_action.get("is_repl"):
+            origin_tags.append("@repl")
+    else:
+        origin_tags.append("unknown")
+
+    tag_str = f" [{', '.join(origin_tags)}]" if origin_tags else ""
+    alias_note = f" (via {matched_action['name']})" if matched_action and matched_action.get("name") != args.action else ""
+
+    try:
+        res = client.call_action(args.action, *pos_args, **kw_args)
+    except Exception as e:
+        print(f"Error executing action '{args.action}' on target '{target_name}'{tag_str}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        if isinstance(res, (dict, list)):
+            print(json.dumps(res, indent=2))
+        else:
+            print(json.dumps({"result": res}, indent=2))
+        return
+
+    # Clean human-readable output
+    header = f"Target '{target_name}'{tag_str}: {args.action}{alias_note}"
+    if isinstance(res, dict):
+        if "ok" in res:
+            if res.get("ok"):
+                print(f"{header} -> OK")
+                if res.get("stdout"):
+                    sys.stdout.write(res["stdout"] if res["stdout"].endswith("\n") else f"{res['stdout']}\n")
+                if res.get("result") is not None and res.get("result") != res.get("stdout"):
+                    print(f"Result: {res['result']}")
+            else:
+                print(f"{header} -> FAILED", file=sys.stderr)
+                err = res.get("stderr") or res.get("error") or "Unknown error"
+                print(f"Error: {err}", file=sys.stderr)
+                sys.exit(1)
+        elif len(res) == 1 and "status" in res:
+            print(f"{header} -> {str(res['status']).upper()}")
+        else:
+            print(f"{header} -> OK")
+            for k, v in res.items():
+                print(f"  {k}: {v}")
+    elif isinstance(res, str):
+        print(f"{header}:")
+        print(res.rstrip())
+    elif isinstance(res, list):
+        print(f"{header}:")
+        for item in res:
+            print(f"  {item}")
+    elif res is None or res is True:
+        print(f"{header} -> OK")
+    elif res is False:
+        print(f"{header} -> FAILED", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(f"{header} -> {res}")
+
+
+def cmd_exec(args_list: list[str]) -> None:
+    """Execute arbitrary MicroPython code directly on ESP32-S3 via CDC0 Raw REPL."""
+    sub_parser = argparse.ArgumentParser(
+        prog="ae-hw-bridge exec",
+        description="Execute MicroPython code on ESP32-S3 raw REPL",
+    )
+    sub_parser.add_argument("-t", "--target", default=None, help="Target name (default: auto)")
+    sub_parser.add_argument("code", help="MicroPython code string to execute")
+    sub_parser.add_argument("--timeout", type=float, default=10.0, help="Execution timeout in seconds")
+    args = sub_parser.parse_args(args_list)
+
+    client = _get_or_start_daemon(args.target)
+    try:
+        res = client.target_exec(args.code, timeout=args.timeout)
+        if res.get("stdout"):
+            sys.stdout.write(res["stdout"])
+        if res.get("stderr"):
+            sys.stderr.write(res["stderr"])
+        if not res.get("ok"):
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error executing MicroPython code: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_send(args_list: list[str]) -> None:
+    """Send shell command to target UART console (CDC1) and print output."""
+    sub_parser = argparse.ArgumentParser(
+        prog="ae-hw-bridge send",
+        description="Send shell command to target UART console and display response",
+    )
+    sub_parser.add_argument("-t", "--target", default=None, help="Target name (default: auto)")
+    sub_parser.add_argument("command", help="Shell command to send (e.g. 'uname -a')")
+    sub_parser.add_argument("--timeout", type=float, default=5.0, help="Wait timeout in seconds")
+    args = sub_parser.parse_args(args_list)
+
+    client = _get_or_start_daemon(args.target)
+    try:
+        out = client.target_send(args.command, wait_timeout=args.timeout)
+        print(out)
+    except Exception as e:
+        print(f"Error sending command to target UART: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     """CLI entrypoint for running the AE-HW-BRIDGE MCP server and utility subcommands."""
+    log_level = logging.DEBUG if os.getenv("AE_DEBUG") else logging.WARNING
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         stream=sys.stderr,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Handle subcommands: console, status, stop, list, label, daemon
+    # Handle subcommands: console, status, stop, actions, call, exec, send, list, label, daemon
     if len(sys.argv) > 1:
         cmd = sys.argv[1]
         if cmd == "console":
@@ -699,6 +983,18 @@ def main() -> None:
             return
         elif cmd == "stop":
             cmd_stop(sys.argv[2:])
+            return
+        elif cmd == "actions":
+            cmd_actions(sys.argv[2:])
+            return
+        elif cmd == "call":
+            cmd_call(sys.argv[2:])
+            return
+        elif cmd == "exec":
+            cmd_exec(sys.argv[2:])
+            return
+        elif cmd == "send":
+            cmd_send(sys.argv[2:])
             return
         elif cmd == "list":
             cmd_list_devices()
@@ -731,6 +1027,10 @@ def main() -> None:
         description="AE-HW-BRIDGE FastMCP Server and hardware bridge CLI.",
         epilog="Subcommands:\n"
                "  console   Connect to target UART console (interactive terminal or log streaming)\n"
+               "  actions   List available target actions (reset, power_cycle, exec, send, etc.)\n"
+               "  call      Invoke a target action dynamically (e.g. ae-hw-bridge call reset)\n"
+               "  exec      Execute MicroPython code on ESP32-S3 raw REPL\n"
+               "  send      Send shell command to target UART console\n"
                "  status    Check running daemon status, ports, and virtual PTY\n"
                "  stop      Stop running daemon and release hardware ports\n"
                "  list      List connected HW-Puppet boards and targets\n"

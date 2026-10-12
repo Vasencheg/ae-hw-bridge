@@ -46,17 +46,22 @@ def find_config_file(base_dir: Optional[Path] = None) -> Optional[Path]:
     """Search working directory hierarchy for .ae-hw-bridge configuration file."""
     cwd = (base_dir or Path.cwd()).resolve()
 
-    candidates = [
-        cwd / ".ae-hw-bridge" / "config.yml",
-        cwd / ".ae-hw-bridge" / "config.yaml",
-        cwd / ".ae-hw-bridge" / "config.json",
-        cwd / "config.yml",
-        cwd / "config.yaml",
-    ]
+    cur = cwd
+    while True:
+        candidates = [
+            cur / ".ae-hw-bridge" / "config.yml",
+            cur / ".ae-hw-bridge" / "config.yaml",
+            cur / ".ae-hw-bridge" / "config.json",
+            cur / "config.yml",
+            cur / "config.yaml",
+        ]
+        for c in candidates:
+            if c.exists() and c.is_file():
+                return c
+        if (cur / ".git").exists() or cur.parent == cur:
+            break
+        cur = cur.parent
 
-    for c in candidates:
-        if c.exists() and c.is_file():
-            return c
     return None
 
 

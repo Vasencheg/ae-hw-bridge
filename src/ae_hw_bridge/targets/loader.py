@@ -51,36 +51,53 @@ class TargetLoader:
     def discover_target_files(cls, base_dir: Optional[Path] = None) -> dict[str, Path]:
         """Discover target definitions in .ae-hw-bridge/targets/ or targets/ directory.
 
+        Searches current working directory and parent directories up to git root.
+
         Returns:
             Dict mapping target_name -> file_path
         """
         cwd = (base_dir or Path.cwd()).resolve()
-        search_dirs = [
-            cwd / ".ae-hw-bridge" / "targets",
-            cwd / "targets",
-        ]
+        search_dirs: list[Path] = []
+
+        cur = cwd
+        while True:
+            search_dirs.extend([
+                cur / ".ae-hw-bridge" / "targets",
+                cur / "targets",
+            ])
+            if (cur / ".git").exists() or cur.parent == cur:
+                break
+            cur = cur.parent
+
+        search_dirs.append(Path.home() / ".config" / "ae-hw-bridge" / "targets")
+
         results: dict[str, Path] = {}
         for s_dir in search_dirs:
             if s_dir.exists() and s_dir.is_dir():
                 for sub in sorted(s_dir.iterdir()):
                     if sub.is_dir() and not sub.name.startswith((".", "_")):
                         t_py = sub / "target.py"
-                        if t_py.exists():
+                        if t_py.exists() and sub.name not in results:
                             results[sub.name] = t_py
                         else:
                             py_files = [f for f in sorted(sub.glob("*.py")) if not f.name.startswith("_")]
-                            if py_files:
+                            if py_files and sub.name not in results:
                                 results[sub.name] = py_files[0]
                     elif sub.is_file() and sub.suffix == ".py" and not sub.name.startswith((".", "_")):
                         name = sub.stem
                         if name not in results and name != "target":
                             results[name] = sub
 
-        if not results:
-            for s_file in [cwd / ".ae-hw-bridge" / "target.py", cwd / "target.py"]:
-                if s_file.exists():
-                    results["base"] = s_file
+        if "base" not in results:
+            cur = cwd
+            while True:
+                for s_file in [cur / ".ae-hw-bridge" / "target.py", cur / "target.py"]:
+                    if s_file.exists():
+                        results["base"] = s_file
+                        break
+                if "base" in results or (cur / ".git").exists() or cur.parent == cur:
                     break
+                cur = cur.parent
 
         return results
 
@@ -105,6 +122,18 @@ class TargetLoader:
             inst = cls._load_from_path(discovered[name], repl, console)
             if inst:
                 return inst
+
+        # Check package built-in targets (e.g. builtin/jetson.py)
+        builtin_dir = Path(__file__).resolve().parent / "builtin"
+        builtin_candidates = [
+            builtin_dir / f"{name}.py",
+            builtin_dir / name / "target.py",
+        ]
+        for b_cand in builtin_candidates:
+            if b_cand.exists():
+                inst = cls._load_from_path(b_cand, repl, console)
+                if inst:
+                    return inst
 
         _logger.debug("No custom class for target '%s', using BaseTarget", name)
         return BaseTarget(repl=repl, console=console)
@@ -165,7 +194,21 @@ class TargetLoader:
             if target_cls:
                 try:
                     instance = target_cls(repl=repl, console=console)
-                    _logger.info("Loaded custom target %s from %s", target_cls.__name__, f)
+                    resolved_f = f.resolve()
+                    instance.target_file = str(resolved_f)
+                    instance.target_mtime = resolved_f.stat().st_mtime
+                    builtin_dir = (Path(__file__).resolve().parent / "builtin").resolve()
+                    user_cfg_dir = (Path.home() / ".config" / "ae-hw-bridge").resolve()
+
+                    s_f = str(resolved_f)
+                    if str(builtin_dir) in s_f:
+                        instance.target_source = "builtin"
+                    elif str(user_cfg_dir) in s_f:
+                        instance.target_source = "user_config"
+                    else:
+                        instance.target_source = "project"
+
+                    _logger.info("Loaded custom target %s from %s (source: %s)", target_cls.__name__, f, instance.target_source)
                     return instance
                 except Exception as e:
                     _logger.error("Failed to instantiate target %s from %s: %s", target_cls.__name__, f, e)
